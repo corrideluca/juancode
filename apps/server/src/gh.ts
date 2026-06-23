@@ -8,7 +8,7 @@ const MAX_BUFFER = 16 * 1024 * 1024;
 const MAX_PRS = 50;
 
 /** The `gh pr list --json` fields we request. */
-const FIELDS = "number,title,url,headRefName,isDraft,statusCheckRollup";
+const FIELDS = "number,title,url,headRefName,isDraft,statusCheckRollup,author";
 
 /** One entry of gh's `statusCheckRollup` array (CheckRun or StatusContext). */
 interface RollupCheck {
@@ -25,6 +25,7 @@ interface RawPr {
   headRefName: string;
   isDraft: boolean;
   statusCheckRollup?: RollupCheck[] | null;
+  author?: { login?: string } | null;
 }
 
 /** Collapse a PR's individual checks into a single failing/pending/passing/none. */
@@ -54,7 +55,24 @@ export function parsePrs(raw: RawPr[]): PullRequest[] {
     branch: p.headRefName,
     draft: p.isDraft,
     checks: rollupChecks(p.statusCheckRollup),
+    author: p.author?.login ?? "",
   }));
+}
+
+/**
+ * The authenticated GitHub login, cached for the process lifetime. Best-effort:
+ * returns "" if `gh` is missing or unauthenticated (the caller still lists PRs).
+ */
+let viewerLogin: string | undefined;
+export async function getViewerLogin(cwd: string): Promise<string> {
+  if (viewerLogin !== undefined) return viewerLogin;
+  try {
+    const { stdout } = await exec("gh", ["api", "user", "--jq", ".login"], { cwd, maxBuffer: MAX_BUFFER });
+    viewerLogin = stdout.trim();
+  } catch {
+    viewerLogin = "";
+  }
+  return viewerLogin;
 }
 
 /**
@@ -77,7 +95,7 @@ export async function getOpenPrs(cwd: string): Promise<PrListResult> {
   }
   try {
     const raw = JSON.parse(stdout) as RawPr[];
-    return { available: true, prs: parsePrs(raw) };
+    return { available: true, prs: parsePrs(raw), viewer: await getViewerLogin(cwd) };
   } catch {
     return { available: false, prs: [], error: "Could not parse gh output" };
   }

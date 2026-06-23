@@ -27,6 +27,7 @@ interface Props {
  */
 export function FolderPrs({ cwd, onNewSession }: Props) {
   const [open, setOpen] = useState(false);
+  const [mineOnly, setMineOnly] = useState(false);
   const prs = useQuery({
     queryKey: ["prs", cwd],
     queryFn: () => api.prs(cwd),
@@ -49,14 +50,19 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
     };
   }, [open]);
 
-  const list = prs.data?.available ? prs.data.prs : [];
-  if (list.length === 0) return null;
+  const all = prs.data?.available ? prs.data.prs : [];
+  const viewer = prs.data?.viewer ?? "";
+  const mineCount = viewer ? all.filter((pr) => pr.author === viewer).length : 0;
+  // Offer the "mine" filter whenever we know who the viewer is and a filter is meaningful.
+  const canFilterMine = viewer !== "" && all.length > 1;
+  const list = mineOnly && canFilterMine ? all.filter((pr) => pr.author === viewer) : all;
+  if (all.length === 0) return null;
 
   return (
     <span className="relative">
       <button
         type="button"
-        title={`${list.length} open pull request${list.length === 1 ? "" : "s"}`}
+        title={`${all.length} open pull request${all.length === 1 ? "" : "s"}`}
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -64,13 +70,33 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
         }}
         className="rounded bg-neutral-800 px-1.5 text-[10px] font-medium text-neutral-300 hover:bg-neutral-700"
       >
-        {list.length} PR{list.length === 1 ? "" : "s"}
+        {all.length} PR{all.length === 1 ? "" : "s"}
       </button>
       {open && (
         <div
           onClick={(e) => e.stopPropagation()}
           className="absolute top-full right-0 z-20 mt-1 max-h-80 w-72 overflow-y-auto rounded-md border border-neutral-700 bg-neutral-900 py-1 shadow-lg"
         >
+          {canFilterMine && (
+            <div className="flex items-center justify-end gap-2 border-b border-neutral-800 px-2 pb-1.5">
+              <button
+                type="button"
+                onClick={() => setMineOnly((cur) => !cur)}
+                className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                  mineOnly
+                    ? "bg-sky-600/30 text-sky-300"
+                    : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
+                }`}
+              >
+                Created by me ({mineCount})
+              </button>
+            </div>
+          )}
+          {list.length === 0 && (
+            <div className="px-2 py-2 text-center text-[11px] text-neutral-500">
+              No open PRs created by you
+            </div>
+          )}
           {list.map((pr) => {
             const check = CHECK_STYLE[pr.checks];
             return (

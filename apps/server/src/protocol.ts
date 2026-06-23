@@ -164,6 +164,8 @@ export interface PullRequest {
   /** True for draft PRs. */
   draft: boolean;
   checks: PrChecks;
+  /** GitHub login of the PR author (empty if unknown). */
+  author: string;
 }
 
 /** Result of listing a folder's open PRs. */
@@ -171,6 +173,8 @@ export interface PrListResult {
   /** True when `gh` ran in a repo with a remote and returned a list. */
   available: boolean;
   prs: PullRequest[];
+  /** Authenticated GitHub login (`gh api user`), for "created by me" filtering. */
+  viewer?: string;
   /** Why PRs are unavailable (gh missing / not authed / not a repo / no remote). */
   error?: string;
 }

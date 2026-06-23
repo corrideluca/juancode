@@ -59,6 +59,7 @@ describe("parsePrs", () => {
         headRefName: "fix-login",
         isDraft: false,
         statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+        author: { login: "octocat" },
       },
       {
         number: 7,
@@ -77,6 +78,7 @@ describe("parsePrs", () => {
         branch: "fix-login",
         draft: false,
         checks: "passing",
+        author: "octocat",
       },
       {
         number: 7,
@@ -85,6 +87,7 @@ describe("parsePrs", () => {
         branch: "toggle",
         draft: true,
         checks: "none",
+        author: "",
       },
     ]);
   });
