@@ -3,7 +3,9 @@ import type {
   CommentSide,
   DiffComment,
   DiffResult,
+  PrListResult,
   ProviderId,
+  ReviewResult,
   SessionMeta,
 } from "../protocol.ts";
 
@@ -74,6 +76,8 @@ export interface NewComment {
   file: string;
   side: CommentSide;
   line: number;
+  /** Inclusive end of the line range; omit for a single-line comment. */
+  endLine?: number;
   body: string;
 }
 
@@ -81,6 +85,7 @@ export const api = {
   providers: () => getJson<ProviderInfo[]>("/api/providers"),
   status: () => getJson<ProviderStatus[]>("/api/status"),
   sessions: () => getJson<SessionMeta[]>("/api/sessions"),
+  deleteSession: (id: string) => sendJson<void>(`/api/sessions/${id}`, "DELETE"),
   dirs: (path?: string, q?: string) => {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
@@ -88,6 +93,7 @@ export const api = {
     const qs = params.toString();
     return getJson<DirListing>(`/api/dirs${qs ? `?${qs}` : ""}`);
   },
+  prs: (cwd: string) => getJson<PrListResult>(`/api/prs?cwd=${encodeURIComponent(cwd)}`),
   diff: (id: string) => getJson<DiffResult>(`/api/sessions/${id}/diff`),
   beads: (id: string) => getJson<BeadsResult>(`/api/sessions/${id}/beads`),
   comments: (id: string) => getJson<DiffComment[]>(`/api/sessions/${id}/comments`),
@@ -95,4 +101,7 @@ export const api = {
     sendJson<DiffComment>(`/api/sessions/${id}/comments`, "POST", c),
   deleteComment: (id: string, commentId: string) =>
     sendJson<void>(`/api/sessions/${id}/comments/${commentId}`, "DELETE"),
+  clearComments: (id: string) => sendJson<void>(`/api/sessions/${id}/comments`, "DELETE"),
+  review: (id: string) => getJson<ReviewResult | null>(`/api/sessions/${id}/review`),
+  runReview: (id: string) => sendJson<ReviewResult>(`/api/sessions/${id}/review`, "POST"),
 };

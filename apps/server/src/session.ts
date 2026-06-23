@@ -6,12 +6,14 @@ import { appendScrollback } from "./scrollback.ts";
 import { captureCodexSessionId } from "./codexSession.ts";
 import { sessionDb } from "./db.ts";
 import { PROVIDERS } from "./providers.ts";
+import { deriveSessionTitle } from "./sessionTitle.ts";
 import type { ProviderId, SessionMeta } from "./protocol.ts";
 
 type OutputListener = (data: string) => void;
 type ExitListener = (exitCode: number | null) => void;
 
 const PERSIST_DEBOUNCE_MS = 2000;
+const TITLE_POLL_MS = 4000;
 
 export class Session {
   readonly meta: SessionMeta;
@@ -20,6 +22,7 @@ export class Session {
   private readonly outputListeners = new Set<OutputListener>();
   private readonly exitListeners = new Set<ExitListener>();
   private persistTimer: NodeJS.Timeout | null = null;
+  private titleTimer: NodeJS.Timeout | null = null;
 
   private constructor(meta: SessionMeta, args: string[], cols: number, rows: number, isNew: boolean) {
     this.meta = meta;
@@ -52,9 +55,14 @@ export class Session {
       this.meta.status = "exited";
       this.meta.exitCode = exitCode;
       this.meta.updatedAt = Date.now();
+      this.stopTitleWatch();
+      void this.refreshTitle(); // one last read to catch a late-generated title
       this.persistNow();
       for (const l of this.exitListeners) l(exitCode);
     });
+
+    // Keep the title in sync with the CLI's own generated summary / first prompt.
+    this.startTitleWatch();
   }
 
   /** Start a brand-new conversation. */
@@ -112,11 +120,27 @@ export class Session {
     if (this.isRunning) this.proc.write(data);
   }
 
+  /**
+   * Type `text` into the session and submit it, once the CLI's TUI has rendered.
+   * Used to seed a fresh session with context (e.g. a PR to work on). We wait for
+   * the first output so the TUI has entered raw mode before we type, then add a
+   * short delay and a carriage return to submit.
+   */
+  autoSubmit(text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const off = this.onOutput(() => {
+      off();
+      setTimeout(() => this.write(`${trimmed}\r`), 500);
+    });
+  }
+
   resize(cols: number, rows: number): void {
     if (this.isRunning && cols > 0 && rows > 0) this.proc.resize(cols, rows);
   }
 
   kill(): void {
+    this.stopTitleWatch();
     if (this.isRunning) this.proc.kill();
   }
 
@@ -128,6 +152,36 @@ export class Session {
   onExit(listener: ExitListener): () => void {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
+  }
+
+  /** Poll the CLI's transcript so the title reflects what the session is doing. */
+  private startTitleWatch(): void {
+    if (this.titleTimer) return;
+    this.titleTimer = setInterval(() => void this.refreshTitle(), TITLE_POLL_MS);
+    void this.refreshTitle();
+  }
+
+  private stopTitleWatch(): void {
+    if (this.titleTimer) {
+      clearInterval(this.titleTimer);
+      this.titleTimer = null;
+    }
+  }
+
+  /** Read the CLI's generated title (or first prompt) and persist if it changed. */
+  private async refreshTitle(): Promise<void> {
+    const { cliSessionId, provider } = this.meta;
+    if (!cliSessionId) return; // Codex id not discovered yet
+    let title: string | null;
+    try {
+      title = await deriveSessionTitle(provider, cliSessionId);
+    } catch {
+      return; // best-effort; a parse/read failure just leaves the title as-is
+    }
+    if (title && title !== this.meta.title) {
+      this.meta.title = title;
+      this.persistNow();
+    }
   }
 
   private captureCliSessionId(): void {

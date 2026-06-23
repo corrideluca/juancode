@@ -1,8 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
-import type { SessionMeta } from "../protocol.ts";
+import type { ProviderId, SessionMeta } from "../protocol.ts";
+import { FolderPrs } from "./FolderPrs.tsx";
 
 interface FolderGroup {
   cwd: string;
@@ -31,13 +33,68 @@ function groupByFolder(sessions: SessionMeta[]): FolderGroup[] {
 }
 
 export function Sidebar() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: api.sessions,
     refetchInterval: 4000,
   });
+  const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
 
-  const groups = groupByFolder(sessions.data ?? []);
+  // Free-text filter over folder names + session titles.
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? (sessions.data ?? []).filter(
+        (s) => s.title.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q),
+      )
+    : (sessions.data ?? []);
+  const groups = groupByFolder(filtered);
+
+  // Which folder's "+" agent menu is open (keyed by cwd), if any.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+
+  /** Permanently delete a session after confirmation. */
+  const remove = (s: SessionMeta) => {
+    if (!window.confirm(`Delete session "${s.title}"? This can't be undone.`)) return;
+    void api.deleteSession(s.id).then(() => {
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    });
+  };
+
+  // Close the agent menu on any outside click / Escape.
+  useEffect(() => {
+    if (!menuFor) return;
+    const close = () => setMenuFor(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuFor(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuFor]);
+
+  /**
+   * Spawn a terminal for `provider` directly at `cwd`, then open it. An optional
+   * `initialInput` is auto-submitted to the fresh session (e.g. PR context).
+   */
+  const spawn = (provider: ProviderId, cwd: string, initialInput?: string) => {
+    setMenuFor(null);
+    const unsub = socket.subscribe((msg) => {
+      if (msg.type === "created") {
+        unsub();
+        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        void navigate({ to: "/session/$id", params: { id: msg.session.id } });
+      } else if (msg.type === "error") {
+        unsub();
+      }
+    });
+    socket.send({ type: "create", provider, cwd, cols: 80, rows: 24, initialInput });
+  };
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-neutral-800 bg-neutral-950">
@@ -52,6 +109,15 @@ export function Sidebar() {
           + New
         </Link>
       </div>
+      <div className="px-3 pb-2">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search sessions…"
+          className="w-full rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-500 focus:border-neutral-600 focus:outline-none"
+        />
+      </div>
       <nav className="flex-1 overflow-y-auto">
         {groups.map((g) => (
           <details key={g.cwd} open className="group border-b border-neutral-900">
@@ -64,49 +130,93 @@ export function Sidebar() {
               <span className="ml-auto flex shrink-0 items-center gap-1.5 text-neutral-500">
                 {g.running > 0 && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />}
                 {g.sessions.length}
-                <Link
-                  to="/"
-                  search={{ cwd: g.cwd }}
-                  title={`New chat in ${g.cwd}`}
-                  onClick={(e) => e.stopPropagation()}
-                  className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
-                >
-                  +
-                </Link>
-              </span>
-            </summary>
-            {g.sessions.map((s) => (
-              <Link
-                key={s.id}
-                to="/session/$id"
-                params={{ id: s.id }}
-                className="flex items-center gap-2 py-1.5 pr-4 pl-6 hover:bg-neutral-900 [&.active]:bg-neutral-900"
-              >
-                <span
-                  className={`h-2 w-2 shrink-0 rounded-full ${
-                    s.status === "running" ? "bg-emerald-500" : "bg-neutral-600"
-                  }`}
-                />
-                <span className="truncate text-sm">{s.title}</span>
-                {s.status === "exited" && s.cliSessionId && (
+                <FolderPrs cwd={g.cwd} onNewSession={spawn} />
+                <span className="relative">
                   <button
-                    title="Reactivate session"
+                    type="button"
+                    title={`New terminal in ${g.cwd}`}
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      socket.send({ type: "reactivate", sessionId: s.id, cols: 80, rows: 24 });
+                      setMenuFor((cur) => (cur === g.cwd ? null : g.cwd));
                     }}
-                    className="ml-auto shrink-0 rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-emerald-400"
+                    className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
                   >
-                    ↻
+                    +
                   </button>
-                )}
-              </Link>
-            ))}
+                  {menuFor === g.cwd && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute top-full right-0 z-10 mt-1 min-w-28 overflow-hidden rounded-md border border-neutral-700 bg-neutral-900 py-1 shadow-lg"
+                    >
+                      {(providers.data ?? []).map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            spawn(p.id, g.cwd);
+                          }}
+                          className="block w-full px-3 py-1 text-left text-xs text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </span>
+              </span>
+            </summary>
+            <div className="max-h-64 overflow-y-auto">
+              {g.sessions.map((s) => (
+                <Link
+                  key={s.id}
+                  to="/session/$id"
+                  params={{ id: s.id }}
+                  className="group/item flex items-center gap-2 py-1.5 pr-2 pl-6 hover:bg-neutral-900 [&.active]:bg-neutral-900"
+                >
+                  <span
+                    className={`h-2 w-2 shrink-0 rounded-full ${
+                      s.status === "running" ? "bg-emerald-500" : "bg-neutral-600"
+                    }`}
+                  />
+                  <span className="truncate text-sm">{s.title}</span>
+                  <span className="ml-auto flex shrink-0 items-center">
+                    {s.status === "exited" && s.cliSessionId && (
+                      <button
+                        title="Reactivate session"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          socket.send({ type: "reactivate", sessionId: s.id, cols: 80, rows: 24 });
+                        }}
+                        className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-emerald-400"
+                      >
+                        ↻
+                      </button>
+                    )}
+                    <button
+                      title="Delete session"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        remove(s);
+                      }}
+                      className="rounded px-1 text-neutral-500 opacity-0 group-hover/item:opacity-100 hover:bg-neutral-800 hover:text-red-400"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                </Link>
+              ))}
+            </div>
           </details>
         ))}
-        {sessions.data?.length === 0 && (
-          <p className="px-4 py-3 text-xs text-neutral-500">No sessions yet.</p>
+        {groups.length === 0 && (
+          <p className="px-4 py-3 text-xs text-neutral-500">
+            {q ? "No matching sessions." : "No sessions yet."}
+          </p>
         )}
       </nav>
     </aside>

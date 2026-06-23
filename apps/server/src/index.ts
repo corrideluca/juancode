@@ -6,8 +6,10 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import { DEFAULT_CWD, PORT } from "./config.ts";
 import { getBeads } from "./beads.ts";
-import { commentDb, sessionDb } from "./db.ts";
+import { commentDb, reviewDb, sessionDb } from "./db.ts";
+import { getOpenPrs } from "./gh.ts";
 import { getDiff } from "./git.ts";
+import { runReview } from "./review.ts";
 import type { CommentSide, DiffComment } from "./protocol.ts";
 import { PROVIDERS } from "./providers.ts";
 import { registry } from "./registry.ts";
@@ -49,12 +51,32 @@ app.get("/api/sessions/:id", (req, res) => {
   res.json(meta);
 });
 
+/** Permanently delete a session: kill its live pty (if any), then drop it from sqlite. */
+app.delete("/api/sessions/:id", (req, res) => {
+  const live = registry.get(req.params.id);
+  if (live) live.kill();
+  const deleted = sessionDb.delete(req.params.id);
+  if (!deleted) return res.status(404).json({ error: "not found" });
+  res.status(204).end();
+});
+
 /** Git diff of the session's working dir vs HEAD (incl. staged + untracked). */
 app.get("/api/sessions/:id/diff", async (req, res) => {
   const meta = sessionDb.get(req.params.id);
   if (!meta) return res.status(404).json({ error: "not found" });
   try {
     res.json(await getDiff(meta.cwd));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Open pull requests for a work folder (via the user's real `gh` CLI). */
+app.get("/api/prs", async (req, res) => {
+  const cwd = typeof req.query.cwd === "string" ? req.query.cwd : "";
+  if (!cwd) return res.status(400).json({ error: "cwd required" });
+  try {
+    res.json(await getOpenPrs(cwd));
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
@@ -71,6 +93,31 @@ app.get("/api/sessions/:id/beads", async (req, res) => {
   }
 });
 
+/** Cached 'Review with Claude' findings for a session, or null if none yet. */
+app.get("/api/sessions/:id/review", (req, res) => {
+  if (!sessionDb.get(req.params.id)) return res.status(404).json({ error: "not found" });
+  res.json(reviewDb.get(req.params.id));
+});
+
+/**
+ * Run a fresh 'Review with Claude' pass over the session's working-tree diff,
+ * cache it, and return the findings. Feeds the user's own inline comments to
+ * the model as steering context. Runs the genuine `claude` CLI with the real
+ * env — same fidelity as a session pty.
+ */
+app.post("/api/sessions/:id/review", async (req, res) => {
+  const meta = sessionDb.get(req.params.id);
+  if (!meta) return res.status(404).json({ error: "not found" });
+  try {
+    const diff = await getDiff(meta.cwd);
+    const result = await runReview(meta.cwd, diff.files, commentDb.list(req.params.id), Date.now());
+    reviewDb.save(req.params.id, result);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 /** Inline review comments for a session's diff. */
 app.get("/api/sessions/:id/comments", (req, res) => {
   if (!sessionDb.get(req.params.id)) return res.status(404).json({ error: "not found" });
@@ -79,11 +126,14 @@ app.get("/api/sessions/:id/comments", (req, res) => {
 
 app.post("/api/sessions/:id/comments", (req, res) => {
   if (!sessionDb.get(req.params.id)) return res.status(404).json({ error: "not found" });
-  const { file, side, line, body } = req.body ?? {};
+  const { file, side, line, endLine, body } = req.body ?? {};
+  // endLine is optional and defaults to a single-line comment.
+  const end = endLine === undefined ? line : endLine;
   if (
     typeof file !== "string" ||
     (side !== "old" && side !== "new") ||
     !Number.isInteger(line) ||
+    !Number.isInteger(end) ||
     typeof body !== "string" ||
     !body.trim()
   ) {
@@ -94,12 +144,20 @@ app.post("/api/sessions/:id/comments", (req, res) => {
     sessionId: req.params.id,
     file,
     side: side as CommentSide,
-    line,
+    line: Math.min(line, end),
+    endLine: Math.max(line, end),
     body: body.trim(),
     createdAt: Date.now(),
   };
   commentDb.add(comment);
   res.status(201).json(comment);
+});
+
+/** Drop every comment for a session — called once a batched review is sent. */
+app.delete("/api/sessions/:id/comments", (req, res) => {
+  if (!sessionDb.get(req.params.id)) return res.status(404).json({ error: "not found" });
+  commentDb.clear(req.params.id);
+  res.status(204).end();
 });
 
 app.delete("/api/sessions/:id/comments/:commentId", (req, res) => {

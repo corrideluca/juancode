@@ -3,6 +3,7 @@ import { WebSocketServer } from "ws";
 import { sessionDb } from "./db.ts";
 import { registry } from "./registry.ts";
 import { isProviderId } from "./providers.ts";
+import { recoverCliSessionId } from "./recoverSession.ts";
 import type { ClientMessage, ServerMessage } from "./protocol.ts";
 
 export function setupWebSocket(server: Server): void {
@@ -36,6 +37,10 @@ export function setupWebSocket(server: Server): void {
         send({ type: "error", message: "Invalid JSON" });
         return;
       }
+      void handle(msg);
+    });
+
+    const handle = async (msg: ClientMessage): Promise<void> => {
 
       switch (msg.type) {
         case "create": {
@@ -45,6 +50,7 @@ export function setupWebSocket(server: Server): void {
           }
           try {
             const session = registry.create(msg.provider, msg.cwd, msg.cols, msg.rows);
+            if (msg.initialInput) session.autoSubmit(msg.initialInput);
             send({ type: "created", session: session.meta });
             subscribe(session.id);
             send({ type: "attached", sessionId: session.id, scrollback: "", session: session.meta });
@@ -90,11 +96,25 @@ export function setupWebSocket(server: Server): void {
             send({ type: "error", sessionId: msg.sessionId, message: "Session not found" });
             return;
           }
+          // Old sessions predate CLI-id capture; try to recover it from the
+          // CLI's own transcript so they can be resumed like newer ones.
+          if (!meta.cliSessionId) {
+            const recovered = await recoverCliSessionId(
+              meta.provider,
+              meta.cwd,
+              meta.createdAt,
+              sessionDb.usedCliSessionIds(),
+            );
+            if (recovered) {
+              sessionDb.setCliSessionId(meta.id, recovered);
+              meta.cliSessionId = recovered;
+            }
+          }
           if (!meta.cliSessionId) {
             send({
-              type: "error",
+              type: "unresumable",
               sessionId: msg.sessionId,
-              message: "This session can't be resumed (no captured CLI session id)",
+              reason: "No prior CLI conversation could be found to resume this session.",
             });
             return;
           }
@@ -132,7 +152,7 @@ export function setupWebSocket(server: Server): void {
           send({ type: "error", message: "Unknown message type" });
         }
       }
-    });
+    };
 
     ws.on("close", () => {
       for (const cleanup of subscriptions.values()) cleanup();
