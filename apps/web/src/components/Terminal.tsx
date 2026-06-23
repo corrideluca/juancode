@@ -50,6 +50,9 @@ export function Terminal({ sessionId }: { sessionId: string }) {
             } ──\x1b[0m\r\n`,
           );
           break;
+        case "unresumable":
+          term.write(`\r\n\x1b[2m── ${msg.reason} Use “New chat here” to continue. ──\x1b[0m\r\n`);
+          break;
         case "error":
           term.write(`\r\n\x1b[31m${msg.message}\x1b[0m\r\n`);
           break;

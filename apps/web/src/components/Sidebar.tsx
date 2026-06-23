@@ -183,13 +183,15 @@ export function Sidebar() {
                   />
                   <span className="truncate text-sm">{s.title}</span>
                   <span className="ml-auto flex shrink-0 items-center">
-                    {s.status === "exited" && s.cliSessionId && (
+                    {s.status === "exited" && (
                       <button
-                        title="Reactivate session"
+                        title="Resume session"
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          socket.send({ type: "reactivate", sessionId: s.id, cols: 80, rows: 24 });
+                          // Open it — the session view resumes (recovering an old
+                          // CLI id if needed) and shows a fallback if it can't.
+                          void navigate({ to: "/session/$id", params: { id: s.id } });
                         }}
                         className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-emerald-400"
                       >

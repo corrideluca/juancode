@@ -1,12 +1,14 @@
 import { createServer } from "node:http";
-import { existsSync, readdirSync, type Dirent } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync, type Dirent } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import express from "express";
 import { DEFAULT_CWD, PORT } from "./config.ts";
 import { getBeads } from "./beads.ts";
 import { commentDb, reviewDb, sessionDb } from "./db.ts";
+import { editors } from "./editor.ts";
 import { getOpenPrs } from "./gh.ts";
 import { getDiff } from "./git.ts";
 import { runReview } from "./review.ts";
@@ -166,6 +168,40 @@ app.delete("/api/sessions/:id/comments/:commentId", (req, res) => {
   res.status(204).end();
 });
 
+/** Where dropped files land. The CLI runs on this same machine, so a temp-dir
+ *  path is directly readable by `claude`/`codex` once typed into the prompt. */
+const UPLOAD_DIR = join(tmpdir(), "juancode-uploads");
+
+/** Strip a client-supplied filename down to a safe, space-free basename. */
+function safeUploadName(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() ?? "";
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
+  return cleaned.slice(-128) || "file";
+}
+
+/**
+ * Accept a dragged file's raw bytes and persist them to the upload dir, then
+ * return the absolute path. Browsers don't expose a dragged file's real local
+ * path, so the web client uploads the bytes here and feeds the saved path to
+ * the CLI prompt. `express.raw` handles any content type for this route only;
+ * the global json parser leaves non-json bodies untouched.
+ */
+app.post("/api/uploads", express.raw({ type: () => true, limit: "100mb" }), (req, res) => {
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) {
+    return res.status(400).json({ error: "empty upload" });
+  }
+  const name = safeUploadName(typeof req.query.name === "string" ? req.query.name : "");
+  try {
+    mkdirSync(UPLOAD_DIR, { recursive: true });
+    const path = join(UPLOAD_DIR, `${randomUUID().slice(0, 8)}-${name}`);
+    writeFileSync(path, body);
+    res.json({ path });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 /** Directories we never descend into when searching — noisy and rarely a cwd. */
 const SEARCH_SKIP = new Set(["node_modules", "dist", "build", "coverage", "vendor", "target"]);
 
@@ -249,6 +285,7 @@ server.listen(PORT, () => {
 function shutdown() {
   console.log("\nShutting down, killing live sessions…");
   registry.killAll();
+  editors.killAll();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();
 }

@@ -29,6 +29,53 @@
   color: #d4d4d4;
 }
 
+/* Prism/refractor syntax tokens, scoped to the diff. Palette tuned to sit on
+   the dark insert/delete row backgrounds (roughly VS Code Dark+). */
+.diff-dark .token.comment,
+.diff-dark .token.prolog,
+.diff-dark .token.doctype,
+.diff-dark .token.cdata {
+  color: #6a9955;
+  font-style: italic;
+}
+.diff-dark .token.punctuation {
+  color: #9aa2ad;
+}
+.diff-dark .token.property,
+.diff-dark .token.tag,
+.diff-dark .token.boolean,
+.diff-dark .token.number,
+.diff-dark .token.constant,
+.diff-dark .token.symbol {
+  color: #b5cea8;
+}
+.diff-dark .token.selector,
+.diff-dark .token.attr-name,
+.diff-dark .token.string,
+.diff-dark .token.char,
+.diff-dark .token.builtin {
+  color: #ce9178;
+}
+.diff-dark .token.operator,
+.diff-dark .token.entity,
+.diff-dark .token.url {
+  color: #d4d4d4;
+}
+.diff-dark .token.atrule,
+.diff-dark .token.attr-value,
+.diff-dark .token.keyword {
+  color: #569cd6;
+}
+.diff-dark .token.function,
+.diff-dark .token.class-name {
+  color: #dcdcaa;
+}
+.diff-dark .token.regex,
+.diff-dark .token.important,
+.diff-dark .token.variable {
+  color: #d16969;
+}
+
 html,
 body,
 #root {

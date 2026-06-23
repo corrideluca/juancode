@@ -7,11 +7,14 @@ import {
   getChangeKey,
   Hunk,
   parseDiff,
+  tokenize,
   type ChangeData,
   type ChangeEventArgs,
 } from "react-diff-view";
+import refractor from "refractor";
 import { api, type NewComment } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
+import { EditorModal } from "./EditorModal.tsx";
 import type {
   CommentSide,
   DiffComment,
@@ -44,6 +47,58 @@ function anchorOf(change: ChangeData): { side: CommentSide; line: number } {
 function rangeLabel(c: { line: number; endLine: number; side: CommentSide }): string {
   const lines = c.line === c.endLine ? `L${c.line}` : `L${c.line}–${c.endLine}`;
   return c.side === "old" ? `${lines} (old)` : lines;
+}
+
+/** File extension → refractor (Prism) language id for syntax highlighting. */
+const LANG_BY_EXT: Record<string, string> = {
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "jsx",
+  ts: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  tsx: "tsx",
+  json: "json",
+  jsonc: "json",
+  css: "css",
+  scss: "scss",
+  less: "less",
+  html: "markup",
+  xml: "markup",
+  svg: "markup",
+  vue: "markup",
+  md: "markdown",
+  markdown: "markdown",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  py: "python",
+  rb: "ruby",
+  go: "go",
+  rs: "rust",
+  java: "java",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cc: "cpp",
+  hpp: "cpp",
+  cs: "csharp",
+  php: "php",
+  sql: "sql",
+  yml: "yaml",
+  yaml: "yaml",
+  toml: "toml",
+  swift: "swift",
+  kt: "kotlin",
+  lua: "lua",
+};
+
+/** Resolve a path to a language refractor actually has registered, else null. */
+function langFromPath(path: string): string | null {
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  const lang = LANG_BY_EXT[ext];
+  return lang && refractor.registered(lang) ? lang : null;
 }
 
 const STATUS_STYLE: Record<DiffFile["status"], string> = {
@@ -95,6 +150,8 @@ export function ChangesPanel({ sessionId }: { sessionId: string }) {
   const [sel, setSel] = useState<Selection | null>(null);
   const [finalNote, setFinalNote] = useState("");
   const [showSubmit, setShowSubmit] = useState(false);
+  // Path (relative to the repo root) currently open in the editor overlay, if any.
+  const [editing, setEditing] = useState<string | null>(null);
 
   const addMut = useMutation({
     mutationFn: (c: NewComment) => api.addComment(sessionId, c),
@@ -157,6 +214,7 @@ export function ChangesPanel({ sessionId }: { sessionId: string }) {
     return <Centered>Not a git repository — nothing to diff.</Centered>;
   }
   const files = diff.data?.files ?? [];
+  const root = diff.data?.root;
   if (files.length === 0) {
     return <Centered>No changes in the working tree.</Centered>;
   }
@@ -214,6 +272,7 @@ export function ChangesPanel({ sessionId }: { sessionId: string }) {
               onCancel={() => setSel(null)}
               onSubmit={(c) => addMut.mutate(c)}
               onDelete={(id) => delMut.mutate(id)}
+              onEdit={root && file.status !== "deleted" && !file.binary ? () => setEditing(file.path) : undefined}
               submitting={addMut.isPending}
             />
           ))}
@@ -259,6 +318,18 @@ export function ChangesPanel({ sessionId }: { sessionId: string }) {
             </div>
           </div>
         </div>
+      )}
+      {editing && root && (
+        <EditorModal
+          cwd={root}
+          file={editing}
+          onClose={() => {
+            setEditing(null);
+            // The file may have changed on disk — refresh the diff + comments.
+            diff.refetch();
+            comments.refetch();
+          }}
+        />
       )}
     </div>
   );
@@ -347,11 +418,26 @@ interface FileCardProps {
   onCancel: () => void;
   onSubmit: (c: NewComment) => void;
   onDelete: (id: string) => void;
+  /** Open this file in the editor overlay; omitted when not editable. */
+  onEdit?: () => void;
   submitting: boolean;
 }
 
-function FileCard({ file, comments, findings, selection, onGutterClick, onCancel, onSubmit, onDelete, submitting }: FileCardProps) {
+function FileCard({ file, comments, findings, selection, onGutterClick, onCancel, onSubmit, onDelete, onEdit, submitting }: FileCardProps) {
   const parsed = useMemo(() => (file.diff ? parseDiff(file.diff)[0] : undefined), [file.diff]);
+
+  // Syntax-highlight the diff with refractor (Prism). Falls back to plain text
+  // for languages refractor doesn't have, or if tokenizing throws.
+  const tokens = useMemo(() => {
+    if (!parsed) return undefined;
+    const language = langFromPath(file.path);
+    if (!language) return undefined;
+    try {
+      return tokenize(parsed.hunks, { highlight: true, refractor, language });
+    } catch {
+      return undefined;
+    }
+  }, [parsed, file.path]);
 
   // Build the inline widgets (comments + anchored AI findings) and, alongside,
   // the findings we can't anchor onto the current diff (file-level, or a line no
@@ -481,6 +567,15 @@ function FileCard({ file, comments, findings, selection, onGutterClick, onCancel
           <span className="text-emerald-400">+{file.additions}</span>{" "}
           <span className="text-red-400">−{file.deletions}</span>
         </span>
+        {onEdit && (
+          <button
+            onClick={onEdit}
+            title="Open this file in your editor (nvim)"
+            className="shrink-0 rounded border border-neutral-700 px-1.5 py-0.5 text-[11px] text-neutral-300 hover:border-emerald-500 hover:text-emerald-400"
+          >
+            Edit
+          </button>
+        )}
       </div>
       {orphanFindings.length > 0 && (
         <div className="border-b border-neutral-800 bg-neutral-900/40 px-3 py-2 text-sm">
@@ -499,6 +594,7 @@ function FileCard({ file, comments, findings, selection, onGutterClick, onCancel
             viewType="unified"
             diffType={parsed.type}
             hunks={parsed.hunks}
+            tokens={tokens}
             widgets={widgets}
             selectedChanges={selectedChanges}
             gutterEvents={{ onClick: onGutter }}

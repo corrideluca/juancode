@@ -39,7 +39,14 @@ export type ClientMessage =
   | { type: "reactivate"; sessionId: string; cols: number; rows: number }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
-  | { type: "kill"; sessionId: string };
+  | { type: "kill"; sessionId: string }
+  /**
+   * Open a file in the user's real editor ($VISUAL/$EDITOR, default nvim) in an
+   * ephemeral pty (not a persisted session). The server replies with the pty's
+   * id via `editorReady`; thereafter input/resize/kill/output/exit address it by
+   * that id exactly like a session.
+   */
+  | { type: "openEditor"; cwd: string; file: string; cols: number; rows: number };
 
 /** Messages sent from the server to the browser. */
 export type ServerMessage =
@@ -47,6 +54,8 @@ export type ServerMessage =
   | { type: "attached"; sessionId: string; scrollback: string; session: SessionMeta }
   | { type: "output"; sessionId: string; data: string }
   | { type: "exit"; sessionId: string; exitCode: number | null }
+  /** An editor pty was spawned; its id is used as the `sessionId` for I/O. */
+  | { type: "editorReady"; editorId: string }
   /** A reactivate couldn't be honoured: no prior CLI conversation to resume. */
   | { type: "unresumable"; sessionId: string; reason: string }
   | { type: "error"; sessionId?: string; message: string };

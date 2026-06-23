@@ -104,4 +104,14 @@ export const api = {
   clearComments: (id: string) => sendJson<void>(`/api/sessions/${id}/comments`, "DELETE"),
   review: (id: string) => getJson<ReviewResult | null>(`/api/sessions/${id}/review`),
   runReview: (id: string) => sendJson<ReviewResult>(`/api/sessions/${id}/review`, "POST"),
+  /** Upload a dragged file's bytes; returns the absolute path the server saved it to. */
+  uploadFile: async (file: File): Promise<{ path: string }> => {
+    const res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return (await res.json()) as { path: string };
+  },
 };

@@ -1,6 +1,7 @@
 import type { Server } from "node:http";
 import { WebSocketServer } from "ws";
 import { sessionDb } from "./db.ts";
+import { editors } from "./editor.ts";
 import { registry } from "./registry.ts";
 import { isProviderId } from "./providers.ts";
 import { recoverCliSessionId } from "./recoverSession.ts";
@@ -12,14 +13,21 @@ export function setupWebSocket(server: Server): void {
   wss.on("connection", (ws) => {
     // sessionId -> cleanup functions for this connection's subscriptions.
     const subscriptions = new Map<string, () => void>();
+    // Editor ptys this connection opened — killed when it disconnects so an
+    // editor never outlives the tab that opened it (sessions, by design, do).
+    const openedEditors = new Set<string>();
 
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
 
+    // Both real sessions and ephemeral editor ptys are addressed by id over the
+    // same input/resize/kill/output/exit messages — resolve against both.
+    const resolvePty = (id: string) => registry.get(id) ?? editors.get(id);
+
     const subscribe = (sessionId: string) => {
       if (subscriptions.has(sessionId)) return;
-      const session = registry.get(sessionId);
+      const session = resolvePty(sessionId);
       if (!session) return;
       const offOutput = session.onOutput((data) => send({ type: "output", sessionId, data }));
       const offExit = session.onExit((exitCode) => send({ type: "exit", sessionId, exitCode }));
@@ -133,18 +141,30 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        case "openEditor": {
+          try {
+            const ed = editors.open(msg.cwd, msg.file, msg.cols, msg.rows);
+            openedEditors.add(ed.id);
+            subscribe(ed.id);
+            send({ type: "editorReady", editorId: ed.id });
+          } catch (err) {
+            send({ type: "error", message: `Failed to open editor: ${asMessage(err)}` });
+          }
+          return;
+        }
+
         case "input": {
-          registry.get(msg.sessionId)?.write(msg.data);
+          resolvePty(msg.sessionId)?.write(msg.data);
           return;
         }
 
         case "resize": {
-          registry.get(msg.sessionId)?.resize(msg.cols, msg.rows);
+          resolvePty(msg.sessionId)?.resize(msg.cols, msg.rows);
           return;
         }
 
         case "kill": {
-          registry.get(msg.sessionId)?.kill();
+          resolvePty(msg.sessionId)?.kill();
           return;
         }
 
@@ -157,6 +177,9 @@ export function setupWebSocket(server: Server): void {
     ws.on("close", () => {
       for (const cleanup of subscriptions.values()) cleanup();
       subscriptions.clear();
+      // Editor ptys are tab-scoped — tear them down with the connection.
+      for (const id of openedEditors) editors.get(id)?.kill();
+      openedEditors.clear();
     });
   });
 }
