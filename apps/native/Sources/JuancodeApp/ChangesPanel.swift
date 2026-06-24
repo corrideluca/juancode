@@ -328,7 +328,7 @@ private struct FileCard: View {
         VStack(spacing: 0) {
             ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
                 ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
-                    DiffLineRow(line: line) { anchor in beginCompose(anchor) }
+                    DiffLineRow(line: line, path: file.path) { anchor in beginCompose(anchor) }
                     if let a = line.anchor {
                         // Existing comments anchored to this line.
                         ForEach(comments.filter { $0.side == a.side && $0.endLine == a.line }, id: \.id) { c in
@@ -393,15 +393,16 @@ private struct FileCard: View {
 /// One diff line, clickable on its gutter to start a comment on that side+line.
 private struct DiffLineRow: View {
     let line: DiffLine
+    /// File path, so the syntax highlighter can pick a per-language profile.
+    let path: String
     let onComment: ((side: CommentSide, line: Int)) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
             gutter(line.oldLine)
             gutter(line.newLine)
-            Text(marker + line.text)
+            Text(highlighted)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(textColor)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 4)
                 .textSelection(.enabled)
@@ -430,11 +431,21 @@ private struct DiffLineRow: View {
         }
     }
 
-    private var textColor: Color {
+    /// The leading +/-/space marker, tinted by diff kind, plus the line content with
+    /// per-language vim syntax colors layered on top. The marker keeps the diff
+    /// add/remove semantics legible; the content gets the warm vim palette.
+    private var highlighted: AttributedString {
+        var out = AttributedString(marker)
+        out.foregroundColor = markerColor
+        out.append(VimSyntaxPalette.attributed(line.text, path: path))
+        return out
+    }
+
+    private var markerColor: Color {
         switch line.kind {
-        case .insert: return .green
-        case .delete: return .red
-        case .context: return .primary
+        case .insert: return VimSyntaxPalette.diffAdd
+        case .delete: return VimSyntaxPalette.diffRemove
+        case .context: return .secondary
         }
     }
 
@@ -719,6 +730,58 @@ private struct ResizeHandle: View {
                                 width = Swift.min(max, Swift.max(min, width + value.translation.width))
                             })
             )
+    }
+}
+
+// MARK: - Vim-like syntax palette
+
+/// Maps the pure `SyntaxToken` kinds from JuancodeServices to a warm vim-style color
+/// palette (reminiscent of vim's default + common dark colorschemes) and builds the
+/// per-line `AttributedString` the diff rows render (juancode-idg). Colors live here
+/// in the view layer; the tokenizer stays SwiftUI-free and unit-testable.
+enum VimSyntaxPalette {
+    // Diff marker tints (kept separate from the bg so semantics stay legible).
+    static let diffAdd = Color(red: 0.45, green: 0.78, blue: 0.42)
+    static let diffRemove = Color(red: 0.88, green: 0.42, blue: 0.40)
+
+    // Warm vim palette.
+    static let keyword = Color(red: 0.88, green: 0.55, blue: 0.30)   // Statement — warm orange/brown
+    static let string = Color(red: 0.78, green: 0.30, blue: 0.34)    // String — vim red/magenta
+    static let comment = Color(red: 0.45, green: 0.62, blue: 0.95)   // Comment — vim blue
+    static let number = Color(red: 0.78, green: 0.40, blue: 0.78)    // Constant — magenta/purple
+    static let type = Color(red: 0.36, green: 0.74, blue: 0.62)      // Type — vim green/teal
+    static let plain = Color.primary
+
+    static func color(for kind: SyntaxTokenKind) -> Color {
+        switch kind {
+        case .keyword: return keyword
+        case .string: return string
+        case .comment: return comment
+        case .number: return number
+        case .type: return type
+        case .plain: return plain
+        }
+    }
+
+    /// Build a colored `AttributedString` for one line of code by overlaying the
+    /// tokenizer's spans onto a plain base. Gaps between tokens render as `.plain`.
+    static func attributed(_ text: String, path: String) -> AttributedString {
+        var out = AttributedString(text)
+        out.foregroundColor = plain
+        guard !text.isEmpty else { return out }
+        let chars = out.characters
+        for token in highlightLine(text, path: path) {
+            // Translate the String.Index range into the AttributedString character-view
+            // index space by character offset (both share the same character sequence).
+            let lower = text.distance(from: text.startIndex, to: token.range.lowerBound)
+            let upper = text.distance(from: text.startIndex, to: token.range.upperBound)
+            guard lower < upper,
+                  let lo = chars.index(chars.startIndex, offsetBy: lower, limitedBy: chars.endIndex),
+                  let hi = chars.index(chars.startIndex, offsetBy: upper, limitedBy: chars.endIndex)
+            else { continue }
+            out[lo..<hi].foregroundColor = color(for: token.kind)
+        }
+        return out
     }
 }
 
