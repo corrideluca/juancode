@@ -8,6 +8,7 @@ import { sessionDb } from "./db.ts";
 import { PROVIDERS } from "./providers.ts";
 import type { SpawnOptions } from "./providers.ts";
 import { deriveSessionTitle } from "./sessionTitle.ts";
+import { deriveSessionUsage } from "./sessionUsage.ts";
 import { ActivityDetector } from "./activityDetector.ts";
 import type { ProviderId, SessionActivity, SessionMeta } from "./protocol.ts";
 
@@ -76,6 +77,7 @@ export class Session {
       this.detector.reset();
       this.stopTitleWatch();
       void this.refreshTitle(); // one last read to catch a late-generated title
+      void this.refreshUsage(); // and the final turn's token usage
       this.persistNow();
       for (const l of this.exitListeners) l(exitCode);
     });
@@ -107,6 +109,7 @@ export class Session {
       cliSessionId: spec.pinsSessionId ? id : null,
       skipPermissions: opts?.skipPermissions ?? false,
       worktreePath,
+      usage: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -200,11 +203,15 @@ export class Session {
     return () => this.activityListeners.delete(listener);
   }
 
-  /** Poll the CLI's transcript so the title reflects what the session is doing. */
+  /** Poll the CLI's transcript so the title + token usage reflect the session. */
   private startTitleWatch(): void {
     if (this.titleTimer) return;
-    this.titleTimer = setInterval(() => void this.refreshTitle(), TITLE_POLL_MS);
+    this.titleTimer = setInterval(() => {
+      void this.refreshTitle();
+      void this.refreshUsage();
+    }, TITLE_POLL_MS);
     void this.refreshTitle();
+    void this.refreshUsage();
   }
 
   private stopTitleWatch(): void {
@@ -226,6 +233,22 @@ export class Session {
     }
     if (title && title !== this.meta.title) {
       this.meta.title = title;
+      this.persistNow();
+    }
+  }
+
+  /** Read the CLI transcript's token usage and persist if it changed. */
+  private async refreshUsage(): Promise<void> {
+    const { cliSessionId, provider } = this.meta;
+    if (!cliSessionId) return; // Codex id not discovered yet
+    let usage;
+    try {
+      usage = await deriveSessionUsage(provider, cliSessionId);
+    } catch {
+      return; // best-effort; a parse/read failure leaves the usage as-is
+    }
+    if (usage && usage.totalTokens !== (this.meta.usage?.totalTokens ?? -1)) {
+      this.meta.usage = usage;
       this.persistNow();
     }
   }

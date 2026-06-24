@@ -18,8 +18,8 @@ import type { ProviderId } from "./protocol.ts";
  * which case the caller keeps the existing placeholder title.
  */
 
-const CLAUDE_PROJECTS = join(homedir(), ".claude", "projects");
-const CODEX_SESSIONS = join(homedir(), ".codex", "sessions");
+export const CLAUDE_PROJECTS = join(homedir(), ".claude", "projects");
+export const CODEX_SESSIONS = join(homedir(), ".codex", "sessions");
 
 const MAX_TITLE_LEN = 80;
 
@@ -44,7 +44,7 @@ export function tidy(raw: string): string | null {
 }
 
 /** Find a `.jsonl` file by basename anywhere under `root`. */
-async function findByBasename(root: string, basename: string): Promise<string | null> {
+export async function findByBasename(root: string, basename: string): Promise<string | null> {
   let entries: string[];
   try {
     entries = await readdir(root, { recursive: true });
@@ -56,7 +56,7 @@ async function findByBasename(root: string, basename: string): Promise<string | 
 }
 
 /** Stream JSONL lines, calling `onRecord`; stop early when it returns false. */
-async function forEachRecord(
+export async function forEachRecord(
   file: string,
   onRecord: (rec: Record<string, unknown>) => boolean | void,
 ): Promise<void> {
@@ -133,7 +133,7 @@ export async function deriveCodexTitle(
 }
 
 /** Absolute paths of every Codex rollout file, newest scan each call. */
-async function codexRolloutFiles(root: string): Promise<string[]> {
+export async function codexRolloutFiles(root: string): Promise<string[]> {
   let entries: string[];
   try {
     entries = await readdir(root, { recursive: true });

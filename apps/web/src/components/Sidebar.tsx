@@ -6,9 +6,11 @@ import { socket } from "../lib/socket.ts";
 import { registerSessionTitles, useActivityMap } from "../lib/activity.ts";
 import { notifications } from "../lib/notifications.ts";
 import type { ProviderId, SessionMeta } from "../protocol.ts";
+import { aggregateUsage } from "../lib/usage.ts";
 import { ActivityDot } from "./ActivityDot.tsx";
 import { FolderPrs } from "./FolderPrs.tsx";
 import { SearchPanel } from "./SearchPanel.tsx";
+import { UsageBadge } from "./UsageBadge.tsx";
 
 interface FolderGroup {
   cwd: string;
@@ -67,6 +69,8 @@ export function Sidebar() {
       )
     : (sessions.data ?? []);
   const groups = groupByFolder(filtered);
+  // True total across all sessions (not the search-filtered view).
+  const totalUsage = aggregateUsage(sessions.data ?? []);
 
   // Which folder's "+" agent menu is open (keyed by cwd), if any.
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -264,7 +268,10 @@ export function Sidebar() {
                       ⎇
                     </span>
                   )}
-                  <span className="truncate text-sm">{s.title}</span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate text-sm">{s.title}</span>
+                    <UsageBadge usage={s.usage} className="text-[10px] text-neutral-500" />
+                  </span>
                   <span className="ml-auto flex shrink-0 items-center">
                     {s.status === "exited" && (
                       <button
@@ -304,6 +311,12 @@ export function Sidebar() {
           </p>
         )}
       </nav>
+      {totalUsage && (
+        <div className="flex items-center justify-between border-t border-neutral-800 px-4 py-2 text-[11px] text-neutral-400">
+          <span className="text-neutral-500">All sessions</span>
+          <UsageBadge usage={totalUsage} />
+        </div>
+      )}
     </aside>
   );
 }

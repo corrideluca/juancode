@@ -12,6 +12,21 @@ export type ProviderId = "claude" | "codex";
  */
 export type SessionActivity = "busy" | "idle" | "waiting_input";
 
+/**
+ * Per-session token usage parsed from the CLI transcript. `inputTokens` is
+ * fresh (uncached) input; cache reads/writes tracked separately. `costUsd` is a
+ * best-effort estimate (null for Codex / unknown models). See server's
+ * `sessionUsage.ts`.
+ */
+export interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+}
+
 export interface SessionMeta {
   id: string;
   provider: ProviderId;
@@ -39,6 +54,11 @@ export interface SessionMeta {
    * sessions that run in an existing directory.
    */
   worktreePath: string | null;
+  /**
+   * Latest token usage + estimated cost, refreshed from the CLI transcript on
+   * the same poll as the title. Null until the first turn produces usage.
+   */
+  usage: SessionUsage | null;
 }
 
 export type ClientMessage =

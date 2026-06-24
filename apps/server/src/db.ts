@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { DATA_DIR } from "./config.ts";
-import type { DiffComment, ProviderId, ReviewResult, SessionMeta } from "./protocol.ts";
+import type { DiffComment, ProviderId, ReviewResult, SessionMeta, SessionUsage } from "./protocol.ts";
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -39,6 +39,10 @@ if (!sessionCols.includes("skip_permissions")) {
 // Migration: add worktree_path (session-owned git worktree) to older databases.
 if (!sessionCols.includes("worktree_path")) {
   db.exec(`ALTER TABLE sessions ADD COLUMN worktree_path TEXT`);
+}
+// Migration: add usage (JSON-serialized SessionUsage) to older databases.
+if (!sessionCols.includes("usage")) {
+  db.exec(`ALTER TABLE sessions ADD COLUMN usage TEXT`);
 }
 
 // GitHub-PR-style inline comments anchored to a (file, side, line..end_line) range.
@@ -108,6 +112,7 @@ interface Row {
   cli_session_id: string | null;
   skip_permissions: number;
   worktree_path: string | null;
+  usage: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -132,18 +137,29 @@ const rowToMeta = (r: Row): SessionMeta => ({
   cliSessionId: r.cli_session_id ?? null,
   skipPermissions: r.skip_permissions === 1,
   worktreePath: r.worktree_path ?? null,
+  usage: parseUsage(r.usage),
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 });
 
+/** Decode the stored usage JSON, tolerating null/legacy/corrupt rows. */
+function parseUsage(raw: string | null): SessionUsage | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as SessionUsage;
+  } catch {
+    return null;
+  }
+}
+
 const insertStmt = db.prepare(`
-  INSERT INTO sessions (id, provider, cwd, title, status, exit_code, cli_session_id, scrollback, skip_permissions, worktree_path, created_at, updated_at)
-  VALUES (@id, @provider, @cwd, @title, @status, @exitCode, @cliSessionId, '', @skipPermissions, @worktreePath, @createdAt, @updatedAt)
+  INSERT INTO sessions (id, provider, cwd, title, status, exit_code, cli_session_id, scrollback, skip_permissions, worktree_path, usage, created_at, updated_at)
+  VALUES (@id, @provider, @cwd, @title, @status, @exitCode, @cliSessionId, '', @skipPermissions, @worktreePath, @usage, @createdAt, @updatedAt)
 `);
 
 const updateStmt = db.prepare(`
   UPDATE sessions
-  SET title = @title, status = @status, exit_code = @exitCode, cli_session_id = @cliSessionId, scrollback = @scrollback, skip_permissions = @skipPermissions, worktree_path = @worktreePath, updated_at = @updatedAt
+  SET title = @title, status = @status, exit_code = @exitCode, cli_session_id = @cliSessionId, scrollback = @scrollback, skip_permissions = @skipPermissions, worktree_path = @worktreePath, usage = @usage, updated_at = @updatedAt
   WHERE id = @id
 `);
 
@@ -209,12 +225,21 @@ const deleteSessionTxn = db.transaction((id: string): boolean => {
 
 export const sessionDb = {
   insert(meta: SessionMeta): void {
-    insertStmt.run({ ...meta, skipPermissions: meta.skipPermissions ? 1 : 0 });
+    insertStmt.run({
+      ...meta,
+      skipPermissions: meta.skipPermissions ? 1 : 0,
+      usage: meta.usage ? JSON.stringify(meta.usage) : null,
+    });
     syncFts(meta.id, meta.title, "");
   },
 
   update(meta: SessionMeta, scrollback: string): void {
-    updateStmt.run({ ...meta, scrollback, skipPermissions: meta.skipPermissions ? 1 : 0 });
+    updateStmt.run({
+      ...meta,
+      scrollback,
+      skipPermissions: meta.skipPermissions ? 1 : 0,
+      usage: meta.usage ? JSON.stringify(meta.usage) : null,
+    });
     syncFts(meta.id, meta.title, scrollback);
   },
 

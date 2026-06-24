@@ -11,6 +11,7 @@ import { ChangesPanel } from "./ChangesPanel.tsx";
 import { MessageQueue } from "./MessageQueue.tsx";
 import { Terminal } from "./Terminal.tsx";
 import { TerminalPanel } from "./TerminalPanel.tsx";
+import { UsageBadge } from "./UsageBadge.tsx";
 
 /** Which auxiliary view, if any, is open in the collapsible right panel. */
 type SidePanel = "changes" | "issues" | null;
@@ -291,7 +292,10 @@ export function SessionView({ id }: { id: string }) {
               </span>
             )}
           </div>
-          <div className="truncate font-mono text-[11px] text-neutral-500">{meta?.cwd}</div>
+          <div className="flex items-center gap-2 truncate font-mono text-[11px] text-neutral-500">
+            <span className="truncate">{meta?.cwd}</span>
+            {meta?.usage && <UsageBadge usage={meta.usage} className="shrink-0 text-neutral-400" />}
+          </div>
         </div>
         <nav className="mr-auto ml-4 flex gap-1 text-xs">
           {(["changes", "issues"] as const).map((p) => (

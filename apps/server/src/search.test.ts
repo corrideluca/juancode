@@ -33,6 +33,7 @@ const meta = (id: string, title: string): SessionMeta => ({
   cliSessionId: null,
   skipPermissions: false,
   worktreePath: null,
+  usage: null,
 });
 
 describe("toFtsMatch", () => {

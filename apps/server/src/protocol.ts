@@ -14,6 +14,25 @@ export type ProviderId = "claude" | "codex";
  */
 export type SessionActivity = "busy" | "idle" | "waiting_input";
 
+/**
+ * Per-session token usage, parsed from the CLI's transcript (see
+ * `sessionUsage.ts`). `inputTokens` is fresh (uncached) input; cache reads and
+ * writes are tracked separately. `costUsd` is a best-effort estimate from
+ * published per-token rates and is null when the figure can't be computed
+ * (Codex has no per-token price; an unknown Claude model). Persisted on
+ * `SessionMeta` so it survives a restart and feeds the sidebar aggregate.
+ */
+export interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** input + output + cache read + cache write. */
+  totalTokens: number;
+  /** Estimated USD cost, or null when not computable. */
+  costUsd: number | null;
+}
+
 export interface SessionMeta {
   id: string;
   provider: ProviderId;
@@ -44,6 +63,12 @@ export interface SessionMeta {
    * agents work the same repo in parallel without sharing a working tree.
    */
   worktreePath: string | null;
+  /**
+   * Latest token usage + estimated cost for the session, refreshed from the
+   * CLI transcript on the same poll as the title. Null until the first turn
+   * produces usage (or when the transcript can't be read).
+   */
+  usage: SessionUsage | null;
 }
 
 /** Messages sent from the browser to the server. */
