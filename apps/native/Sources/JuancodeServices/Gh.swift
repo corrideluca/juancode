@@ -190,6 +190,96 @@ public func createPr(
         launchFailed: false, timedOut: false)))
 }
 
+// MARK: - PR activity (for the tracked-PR poller, juancode-it5 / juancode-49w)
+
+/// One issue-level PR comment, as returned by `gh pr view --json comments`. We
+/// keep only the fields the poller needs to dedup and summarise new activity.
+public struct PrComment: Sendable, Equatable {
+    public let id: String
+    public let author: String
+    public let body: String
+    public init(id: String, author: String, body: String) {
+        self.id = id; self.author = author; self.body = body
+    }
+}
+
+/// One PR review (`gh pr view --json reviews`). `state` is GitHub's review state
+/// (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING).
+public struct PrReview: Sendable, Equatable {
+    public let id: String
+    public let author: String
+    public let body: String
+    public let state: String
+    public init(id: String, author: String, body: String, state: String) {
+        self.id = id; self.author = author; self.body = body; self.state = state
+    }
+}
+
+/// A snapshot of a PR's reviewable activity: rolled-up CI status, issue comments,
+/// and reviews. What the tracked-PR poller diffs each tick to detect new events.
+public struct PrActivity: Sendable, Equatable {
+    public let checks: PrChecks
+    public let comments: [PrComment]
+    public let reviews: [PrReview]
+    public init(checks: PrChecks, comments: [PrComment], reviews: [PrReview]) {
+        self.checks = checks; self.comments = comments; self.reviews = reviews
+    }
+}
+
+/// Raw `gh pr view --json` comment/review element shapes.
+private struct RawPrComment: Decodable {
+    var id: String?
+    var author: RawPrAuthor?
+    var body: String?
+}
+private struct RawPrReview: Decodable {
+    var id: String?
+    var author: RawPrAuthor?
+    var body: String?
+    var state: String?
+}
+
+/// Map gh's raw activity JSON onto our wire shape. Exposed for testing. Drops any
+/// comment/review missing an `id` (can't be deduped reliably without one).
+func parsePrActivity(_ raw: RawPrActivityForTest) -> PrActivity {
+    PrActivity(
+        checks: rollupChecks(raw.statusCheckRollup),
+        comments: (raw.comments ?? []).compactMap { c in
+            guard let id = c.id else { return nil }
+            return PrComment(id: id, author: c.author?.login ?? "", body: c.body ?? "")
+        },
+        reviews: (raw.reviews ?? []).compactMap { r in
+            guard let id = r.id else { return nil }
+            return PrReview(id: id, author: r.author?.login ?? "",
+                            body: r.body ?? "", state: (r.state ?? "").uppercased())
+        })
+}
+
+/// Test seam mirroring the private raw decode shape (so `parsePrActivity` can be
+/// unit-tested without spawning `gh`). Decodes the same JSON `gh pr view` emits.
+public struct RawPrActivityForTest: Decodable {
+    fileprivate var statusCheckRollup: [RollupCheck]?
+    fileprivate var comments: [RawPrComment]?
+    fileprivate var reviews: [RawPrReview]?
+}
+
+/// Read a single PR's reviewable activity via the real `gh` CLI. Returns nil when
+/// gh is missing/unauthenticated, the cwd isn't a repo, or the output won't parse
+/// — the poller treats nil as "couldn't poll this tick" and tries again later.
+public func getPrActivity(_ cwd: String, number: Int) async -> PrActivity? {
+    let fields = "statusCheckRollup,comments,reviews"
+    do {
+        let r = try await ProcessRunner.capture(
+            ghBin(), ["pr", "view", String(number), "--json", fields],
+            cwd: cwd, maxBytes: MAX_BUFFER)
+        guard r.ok else { return nil }
+        let raw = try JSONDecoder().decode(RawPrActivityForTest.self, from: Data(r.stdout.utf8))
+        return parsePrActivity(raw)
+    } catch {
+        return nil
+    }
+}
+
 /// A clean, message-bearing error for gh failures surfaced to the UI. Mirrors the
 /// `throw new Error(ghErrorReason(...))` the TS throws.
 public struct GhError: Error, Sendable {

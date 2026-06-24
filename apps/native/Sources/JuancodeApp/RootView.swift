@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import JuancodeCore
+import JuancodeServices
 
 struct RootView: View {
     @EnvironmentObject var model: AppModel
@@ -281,20 +282,54 @@ private struct PrRow: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.system(size: 11))
-                // Track hands off to juancode-it5 (watch + auto-fix review/CI),
-                // which is not implemented yet — disabled stub for now.
-                Button("Track") {}
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
-                    .disabled(true)
-                    .help("Tracking — coming soon (juancode-it5)")
+                // Track (juancode-it5): hand the PR to a dedicated agent session that
+                // watches for new review comments / CI status and auto-fixes the
+                // obvious ones, escalating real decisions back here.
+                if let t = tracked {
+                    TrackBadge(state: t.state)
+                    Button("Untrack") { model.untrackPr(t.id) }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                        .help("Stop watching this PR (keeps the session)")
+                } else {
+                    Button("Track") { model.trackPr(pr, cwd: cwd) }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                        .help("Watch this PR — auto-fix review comments & CI, escalate decisions")
+                }
                 Spacer()
             }
             .padding(.leading, 13)
+            // Decisions the tracker won't make on its own — surfaced for the user.
+            if let t = tracked, !t.notifications.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(t.notifications) { note in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9)).foregroundStyle(.orange)
+                            Text(note.message).font(.system(size: 10)).foregroundStyle(.primary)
+                            Spacer(minLength: 4)
+                            Button("Open") {
+                                dismiss()
+                                model.selection = t.sessionId
+                            }
+                            .buttonStyle(.borderless).font(.system(size: 9))
+                            Button("Dismiss") {
+                                model.resolveNotification(prId: t.id, notificationId: note.id)
+                            }
+                            .buttonStyle(.borderless).font(.system(size: 9))
+                        }
+                    }
+                }
+                .padding(.leading, 13)
+                .padding(.top, 2)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
     }
+
+    private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
 
     private var checkColor: Color {
         switch pr.checks {
@@ -311,6 +346,41 @@ private struct PrRow: View {
         case .failing: return "Checks failing"
         case .pending: return "Checks running"
         case .none: return "No checks"
+        }
+    }
+}
+
+/// A small pill showing what a tracked PR is currently doing.
+private struct TrackBadge: View {
+    let state: TrackState
+    var body: some View {
+        Text(label)
+            .font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(color.opacity(0.2))
+            .foregroundStyle(color)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .help(help)
+    }
+    private var label: String {
+        switch state {
+        case .watching: return "watching"
+        case .fixing: return "fixing"
+        case .needsDecision: return "needs you"
+        }
+    }
+    private var color: Color {
+        switch state {
+        case .watching: return .secondary
+        case .fixing: return .blue
+        case .needsDecision: return .orange
+        }
+    }
+    private var help: String {
+        switch state {
+        case .watching: return "Tracking — CI green, watching for new activity"
+        case .fixing: return "Tracking — CI is running/failing; the agent is on it"
+        case .needsDecision: return "Tracking — a change needs your decision"
         }
     }
 }
@@ -480,10 +550,10 @@ struct NewSessionView: View {
     private func start() {
         creating = true
         Task {
-            let ok = await model.create(provider: provider, cwd: cwd,
-                                        skipPermissions: skipPermissions, isolateWorktree: isolateWorktree)
+            let session = await model.create(provider: provider, cwd: cwd,
+                                             skipPermissions: skipPermissions, isolateWorktree: isolateWorktree)
             creating = false
-            if ok { dismiss() }
+            if session != nil { dismiss() }
         }
     }
 }

@@ -67,7 +67,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
-                isolateWorktree: Bool, initialInput: String? = nil) async -> Bool {
+                isolateWorktree: Bool, initialInput: String? = nil) async -> Session? {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
@@ -91,10 +91,10 @@ final class AppModel: ObservableObject {
             if let initialInput, !initialInput.isEmpty { s.autoSubmit(initialInput) }
             refresh()
             selection = s.id
-            return true
+            return s
         } catch {
             errorMessage = "Failed to start \(provider.rawValue): \(error)"
-            return false
+            return nil
         }
     }
 
@@ -131,6 +131,96 @@ final class AppModel: ObservableObject {
         Task {
             await create(provider: .claude, cwd: cwd, skipPermissions: false,
                          isolateWorktree: false, initialInput: prPrompt(pr))
+        }
+    }
+
+    // MARK: - Tracked PRs (juancode-it5)
+
+    /// PRs under continuous watch, keyed by `TrackedPr.key(cwd:number:)`. The poll
+    /// loop diffs each one's `gh` activity and feeds fixes into its agent session.
+    @Published var tracked: [String: TrackedPr] = [:]
+    /// How often the poll loop revisits every tracked PR.
+    private let trackPollInterval: Duration = .seconds(20)
+    private var trackLoop: Task<Void, Never>?
+
+    /// Look up a tracked PR by folder + number (for the "Track / Tracking" toggle).
+    func trackedPr(cwd: String, number: Int) -> TrackedPr? {
+        tracked[TrackedPr.key(cwd: cwd, number: number)]
+    }
+
+    /// Start tracking a PR: spawn a dedicated Claude session seeded with the PR's
+    /// context and the auto-fix-vs-escalate contract, register it, and ensure the
+    /// poll loop is running. No-op if already tracked.
+    func trackPr(_ pr: PullRequest, cwd: String) {
+        let key = TrackedPr.key(cwd: cwd, number: pr.number)
+        guard tracked[key] == nil else { return }
+        Task {
+            let seed = trackSeedPrompt(number: pr.number, title: pr.title,
+                                       branch: pr.branch, url: pr.url)
+            guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: false,
+                                             isolateWorktree: false, initialInput: seed) else { return }
+            tracked[key] = TrackedPr(
+                number: pr.number, title: pr.title, branch: pr.branch, url: pr.url,
+                cwd: cwd, sessionId: session.id)
+            startTrackLoop()
+        }
+    }
+
+    /// Stop tracking a PR. Leaves its agent session alone (the user may still want
+    /// it); just drops it from the watch list. Stops the loop when none remain.
+    func untrackPr(_ id: String) {
+        tracked[id] = nil
+        if tracked.isEmpty { trackLoop?.cancel(); trackLoop = nil }
+    }
+
+    /// Dismiss a surfaced decision once the user has dealt with it.
+    func resolveNotification(prId: String, notificationId: String) {
+        tracked[prId]?.notifications.removeAll { $0.id == notificationId }
+    }
+
+    private func startTrackLoop() {
+        guard trackLoop == nil else { return }
+        trackLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollTrackedOnce()
+                try? await Task.sleep(for: self?.trackPollInterval ?? .seconds(20))
+            }
+        }
+    }
+
+    /// One pass over every tracked PR: fetch its `gh` activity off the main actor,
+    /// classify what changed, inject auto-fix prompts into the agent session, and
+    /// raise notifications for changes that need a human decision.
+    func pollTrackedOnce() async {
+        for (key, pr) in tracked {
+            let cwd = pr.cwd, number = pr.number
+            guard let activity = await Task.detached(priority: .utility, operation: {
+                await getPrActivity(cwd, number: number)
+            }).value else { continue }
+
+            // The entry may have been untracked while we were off-actor.
+            guard var entry = tracked[key] else { continue }
+            let result = classifyPrActivity(prev: entry.snapshot, activity: activity)
+            entry.snapshot = result.snapshot
+            entry.lastPolledAt = nowMs()
+
+            var fixReasons: [String] = []
+            for event in result.events {
+                switch event {
+                case .autoFix(let reason):
+                    fixReasons.append(reason)
+                case .needsDecision(let reason):
+                    entry.notifications.append(TrackNotification(
+                        id: UUID().uuidString, prNumber: number,
+                        message: reason, createdAt: nowMs()))
+                }
+            }
+            if !fixReasons.isEmpty, let session = liveSession(entry.sessionId) {
+                // Write it as if typed: idle → runs now, busy → queued by the CLI.
+                let prompt = autoFixPrompt(number: number, branch: entry.branch, reasons: fixReasons)
+                session.write("\(prompt)\r")
+            }
+            tracked[key] = entry
         }
     }
 
