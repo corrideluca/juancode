@@ -17,6 +17,9 @@ final class AppModel: ObservableObject {
     @Published var selection: String?
     @Published var showingNewSession = false
     @Published var errorMessage: String?
+    /// Sessions whose accept-all flag is mid-flip (pty being resume-restarted), so
+    /// the UI can disable the control until the new pty is up.
+    @Published var flippingPermissions: Set<String> = []
 
     private var activityCancels: [String: () -> Void] = [:]
 
@@ -82,6 +85,26 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = "Failed to start \(provider.rawValue): \(error)"
             return false
+        }
+    }
+
+    /// Flip "accept all" (skip permission prompts) on a live session. There's no
+    /// way to change a running CLI's permission level in place, so the registry
+    /// resume-restarts the pty under the same juancode id, preserving the
+    /// conversation + scrollback. Mirrors the WS `setSkipPermissions` path.
+    func setSkipPermissions(_ id: String, to skip: Bool) async {
+        guard isLive(id), !flippingPermissions.contains(id) else { return }
+        flippingPermissions.insert(id)
+        defer { flippingPermissions.remove(id) }
+        do {
+            // Off the main actor: kills the old pty and forkpty()s a new one.
+            let registry = appState.registry
+            _ = try await Task.detached(priority: .userInitiated) {
+                try await registry.setSkipPermissions(id, skipPermissions: skip, cols: 80, rows: 24)
+            }.value
+            refresh()
+        } catch {
+            errorMessage = "Failed to change permissions: \(error)"
         }
     }
 

@@ -66,6 +66,12 @@ struct SessionRow: View {
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            if meta.skipPermissions {
+                Image(systemName: "bolt.shield.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .help("Accept all (skip permission prompts) is on")
+            }
         }
         .padding(.vertical, 2)
     }
@@ -111,10 +117,11 @@ struct SessionContainer: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
                 Text(meta.title).font(.headline).lineLimit(1)
                 Spacer()
                 if model.isLive(meta.id) {
+                    acceptAllToggle
                     Label("live", systemImage: "dot.radiowaves.left.and.right")
                         .font(.caption).foregroundStyle(.green)
                 } else {
@@ -129,10 +136,31 @@ struct SessionContainer: View {
         .navigationTitle(meta.title)
     }
 
+    /// Per-session accept-all switch. Flipping it resume-restarts the CLI at the
+    /// new permission level (conversation + scrollback preserved). Disabled while
+    /// the flip is in flight.
+    private var acceptAllToggle: some View {
+        let flipping = model.flippingPermissions.contains(meta.id)
+        return Toggle("Accept all", isOn: Binding(
+            get: { meta.skipPermissions },
+            set: { skip in Task { await model.setSkipPermissions(meta.id, to: skip) } }
+        ))
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .font(.caption)
+        .disabled(flipping)
+        .help("Skip permission prompts for this session (restarts the CLI, keeping the conversation)")
+    }
+
     @ViewBuilder
     private var terminal: some View {
         if let session = model.liveSession(meta.id) {
+            // Key by the Session's object identity: a permissions flip swaps in a
+            // brand-new Session (same juancode id) behind the same pty, so this
+            // forces a fresh terminal that subscribes to the new pty and replays
+            // the carried-forward scrollback.
             SwiftTermLive(session: session)
+                .id(ObjectIdentifier(session))
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))
         }
