@@ -88,6 +88,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Start a new session directly in a given folder + provider, bypassing the
+    /// NewSessionView sheet. Mirrors the web sidebar's per-folder "+" agent menu
+    /// (accept-all off, no worktree). Selects the new session on success.
+    func createInFolder(provider: ProviderId, cwd: String) {
+        Task { await create(provider: provider, cwd: cwd, skipPermissions: false, isolateWorktree: false) }
+    }
+
     /// Flip "accept all" (skip permission prompts) on a live session. There's no
     /// way to change a running CLI's permission level in place, so the registry
     /// resume-restarts the pty under the same juancode id, preserving the

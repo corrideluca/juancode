@@ -27,22 +27,71 @@ struct RootView: View {
     }
 }
 
+/// A folder's sessions, mirroring the web `FolderGroup` (groupByFolder).
+private struct FolderGroup: Identifiable {
+    let cwd: String
+    /// Last path segment of the cwd, shown as the header label.
+    let name: String
+    let sessions: [SessionMeta]
+    let running: Int
+    var id: String { cwd }
+}
+
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
 
+    /// Free-text filter over folder names/paths + session titles.
+    @State private var query = ""
+
+    /// Sessions filtered by `query` (case-insensitive over title + cwd), then
+    /// grouped by folder and sorted stably by cwd — mirrors the web sidebar.
+    private var groups: [FolderGroup] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let filtered = q.isEmpty
+            ? model.sessions
+            : model.sessions.filter {
+                $0.title.lowercased().contains(q) || $0.cwd.lowercased().contains(q)
+            }
+        let byCwd = Dictionary(grouping: filtered, by: \.cwd)
+        return byCwd.map { cwd, sessions in
+            FolderGroup(
+                cwd: cwd,
+                name: (cwd as NSString).lastPathComponent.isEmpty ? cwd : (cwd as NSString).lastPathComponent,
+                sessions: sessions,
+                running: sessions.filter { model.isLive($0.id) }.count)
+        }
+        .sorted { $0.cwd.localizedCompare($1.cwd) == .orderedAscending }
+    }
+
     var body: some View {
-        List(selection: $model.selection) {
-            Section("Sessions") {
-                ForEach(model.sessions, id: \.id) { meta in
-                    SessionRow(meta: meta, activity: model.activity(meta.id), live: model.isLive(meta.id))
-                        .tag(meta.id)
-                        .contextMenu {
-                            Button("Delete", role: .destructive) { model.delete(meta.id) }
+        VStack(spacing: 0) {
+            TextField("Filter sessions…", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+            List(selection: $model.selection) {
+                ForEach(groups) { group in
+                    Section {
+                        ForEach(group.sessions, id: \.id) { meta in
+                            SessionRow(meta: meta, activity: model.activity(meta.id), live: model.isLive(meta.id))
+                                .tag(meta.id)
+                                .contextMenu {
+                                    Button("Delete", role: .destructive) { model.delete(meta.id) }
+                                }
                         }
+                    } header: {
+                        FolderHeader(group: group)
+                    }
+                }
+                if groups.isEmpty {
+                    Text(query.isEmpty ? "No sessions yet." : "No matching sessions.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
             }
+            .listStyle(.sidebar)
         }
-        .listStyle(.sidebar)
         .toolbar {
             ToolbarItem {
                 Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
@@ -50,6 +99,39 @@ struct SidebarView: View {
             }
         }
         .navigationTitle("juancode")
+    }
+}
+
+/// Collapsible section header for a folder: name (full path as tooltip), a
+/// running-session badge, and a per-folder "+" agent menu that spawns a new
+/// session in this folder. Mirrors the web sidebar's folder `<summary>`.
+private struct FolderHeader: View {
+    @EnvironmentObject var model: AppModel
+    let group: FolderGroup
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(group.name).lineLimit(1).help(group.cwd)
+            if group.running > 0 {
+                Text("\(group.running) running")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.green)
+            }
+            Spacer()
+            Menu {
+                ForEach(ProviderId.allCases, id: \.self) { p in
+                    Button(Providers.spec(for: p).label) {
+                        model.createInFolder(provider: p, cwd: group.cwd)
+                    }
+                }
+            } label: {
+                Image(systemName: "plus")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("New session in \(group.cwd)")
+        }
     }
 }
 
