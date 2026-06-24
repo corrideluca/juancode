@@ -268,11 +268,37 @@ private struct FileCard: View {
     /// single selected file is always shown fully expanded.
     var collapsible: Bool = true
 
-    /// The (side, line) a new comment is being composed on, if any.
-    @State private var composing: (side: CommentSide, line: Int)?
+    /// The (side, line, endLine) range a new comment is being composed on, if any.
+    /// A single-line click sets line == endLine; a drag-select widens the range.
+    @State private var composing: ComposeAnchor?
     @State private var draft = ""
 
+    /// Live drag-select state: the global flat-row index the drag started on, the
+    /// index currently under the cursor, and the measured uniform row height. Non-nil
+    /// only while a press-drag is in flight over the line stack.
+    @State private var dragAnchorIndex: Int?
+    @State private var dragCurrentIndex: Int?
+    /// Reported frame of each flat diff row (global index → rect in the drag space),
+    /// used to hit-test the drag cursor against actual row geometry.
+    @State private var rowFrames: [Int: CGRect] = [:]
+
+    /// Where comment composition is anchored. Mirrors the range data model (side +
+    /// start line + end line) so a drag can populate a multi-line range.
+    private struct ComposeAnchor: Equatable {
+        let side: CommentSide
+        let line: Int
+        let endLine: Int
+    }
+
+    /// Identifies a coordinate space local to one file's diff line stack.
+    private var dragSpace: String { "diff-lines-\(file.path)" }
+
     private var hunks: [DiffHunk] { parseUnifiedDiff(file.diff) }
+
+    /// Every visible diff line flattened to a single indexed list, so a drag offset
+    /// can address any row regardless of which hunk it lives in. The drag-select
+    /// gesture and its highlight both index into this list.
+    private var flatLines: [DiffLine] { hunks.flatMap(\.lines) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -324,34 +350,129 @@ private struct FileCard: View {
         .background(Color.secondary.opacity(0.08))
     }
 
+    /// The diff rows, comments, and composer, laid out top-to-bottom. The whole stack
+    /// is wrapped in a named coordinate space and carries a press-drag-release gesture:
+    /// pressing a line and dragging across others highlights the spanned rows, and
+    /// releasing opens the composer anchored to that range. A press with no drag falls
+    /// through to the per-row tap (single-line comment), preserving 3bq's behavior.
     private var hunkBody: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
-                ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
-                    DiffLineRow(line: line, path: file.path) { anchor in beginCompose(anchor) }
-                    if let a = line.anchor {
-                        // Existing comments anchored to this line.
-                        ForEach(comments.filter { $0.side == a.side && $0.endLine == a.line }, id: \.id) { c in
-                            CommentRow(comment: c) { model.deleteComment(sessionId, commentId: c.id) }
-                        }
-                        // The composer, if active for this line.
-                        if let comp = composing, comp.side == a.side, comp.line == a.line {
-                            composer(side: comp.side, line: comp.line)
-                        }
+        // Pair each flat row with its global index so frame reports and the drag-select
+        // highlight share one index space.
+        let indexed = Array(flatLines.enumerated())
+        return VStack(spacing: 0) {
+            ForEach(indexed, id: \.offset) { idx, line in
+                DiffLineRow(
+                    line: line,
+                    path: file.path,
+                    selected: isRowSelected(idx),
+                    onComment: { anchor in
+                        beginCompose(ComposeAnchor(side: anchor.side, line: anchor.line, endLine: anchor.line))
+                    })
+                    // Report this row's frame (in the stack's coordinate space) so the
+                    // drag gesture can hit-test the cursor against actual row geometry —
+                    // robust to the comments/composer interspersed below.
+                    .background(rowFrameReporter(index: idx))
+                if let a = line.anchor {
+                    // Existing comments whose range ENDS on this line (so a range comment
+                    // shows once, under its last line — matching how it anchors).
+                    ForEach(comments.filter { $0.side == a.side && $0.endLine == a.line }, id: \.id) { c in
+                        CommentRow(comment: c) { model.deleteComment(sessionId, commentId: c.id) }
+                    }
+                    // The composer, if its range ends on this line.
+                    if let comp = composing, comp.side == a.side, comp.endLine == a.line {
+                        composer(comp)
                     }
                 }
             }
         }
+        .coordinateSpace(name: dragSpace)
+        .onPreferenceChange(RowFramesKey.self) { rowFrames = $0 }
+        // Simultaneous so a stationary press still reaches each row's single-line tap;
+        // the gesture only takes over once the cursor actually crosses into another row.
+        .simultaneousGesture(dragSelectGesture)
     }
 
-    private func beginCompose(_ anchor: (side: CommentSide, line: Int)) {
+    /// A clear backdrop that publishes this row's frame in the drag coordinate space.
+    private func rowFrameReporter(index: Int) -> some View {
+        GeometryReader { geo in
+            Color.clear.preference(
+                key: RowFramesKey.self,
+                value: [index: geo.frame(in: .named(dragSpace))])
+        }
+    }
+
+    /// Press-drag-release over the line stack. `minimumDistance: 0` so we still see the
+    /// initial press location; we only treat it as a range-select once the cursor
+    /// actually moves to a different row, otherwise a plain click stays single-line.
+    private var dragSelectGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(dragSpace))
+            .onChanged { value in
+                guard let start = rowIndex(at: value.startLocation),
+                      let now = rowIndex(at: value.location) else { return }
+                // Only engage range-select once the drag spans more than one row, so a
+                // stationary press doesn't pre-empt the per-row single-line tap.
+                if now != start || dragAnchorIndex != nil {
+                    dragAnchorIndex = start
+                    dragCurrentIndex = now
+                }
+            }
+            .onEnded { value in
+                defer { dragAnchorIndex = nil; dragCurrentIndex = nil }
+                guard let start = dragAnchorIndex,
+                      let now = rowIndex(at: value.location) ?? dragCurrentIndex,
+                      start != now else { return }  // no drag → let the tap handle it
+                beginRangeCompose(start: start, end: now)
+            }
+    }
+
+    /// Hit-test a point (in the stack's coordinate space) against the reported row
+    /// frames, returning the global index of the row it falls in, clamped to the ends.
+    private func rowIndex(at point: CGPoint) -> Int? {
+        guard !rowFrames.isEmpty else { return nil }
+        // Exact containment first.
+        if let hit = rowFrames.first(where: { $0.value.contains(point) }) { return hit.key }
+        // Otherwise clamp to nearest by vertical position (drag overshot top/bottom).
+        let sorted = rowFrames.sorted { $0.value.minY < $1.value.minY }
+        guard let first = sorted.first, let last = sorted.last else { return nil }
+        if point.y <= first.value.minY { return first.key }
+        if point.y >= last.value.maxY { return last.key }
+        // Between rows (gaps from interspersed comments): pick the closest by midpoint.
+        return sorted.min { abs($0.value.midY - point.y) < abs($1.value.midY - point.y) }?.key
+    }
+
+    /// True while a drag-select spans this flat row index.
+    private func isRowSelected(_ index: Int) -> Bool {
+        guard let a = dragAnchorIndex, let c = dragCurrentIndex else { return false }
+        return normalizedLineRange(anchor: a, current: c).contains(index)
+    }
+
+    private func beginCompose(_ anchor: ComposeAnchor) {
         composing = anchor
         draft = ""
     }
 
-    private func composer(side: CommentSide, line: Int) -> some View {
+    /// Turn a flat-index drag range into a side+line range and open the composer.
+    /// Anchors to the side+line of the range's two endpoints; if the endpoints land on
+    /// different sides (e.g. a delete then an insert), falls back to the new side using
+    /// whatever line numbers are available, normalized low→high.
+    private func beginRangeCompose(start: Int, end: Int) {
+        let range = normalizedLineRange(anchor: start, current: end)
+        let rows = flatLines
+        let anchors = range.compactMap { rows.indices.contains($0) ? rows[$0].anchor : nil }
+        guard let first = anchors.first, let last = anchors.last else { return }
+        // Prefer keeping both endpoints on one side; if they differ, take the new side.
+        let side: CommentSide = first.side == last.side ? first.side : .new
+        let lines = anchors.filter { $0.side == side }.map(\.line)
+        guard let lo = lines.min(), let hi = lines.max() else {
+            beginCompose(ComposeAnchor(side: first.side, line: first.line, endLine: first.line))
+            return
+        }
+        beginCompose(ComposeAnchor(side: side, line: lo, endLine: hi))
+    }
+
+    private func composer(_ anchor: ComposeAnchor) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Line \(line)\(side == .old ? " (old)" : "")")
+            Text(commentRangeLabel(side: anchor.side, line: anchor.line, endLine: anchor.endLine))
                 .font(.system(size: 10)).foregroundStyle(.secondary)
             TextEditor(text: $draft)
                 .font(.system(size: 12))
@@ -359,8 +480,8 @@ private struct FileCard: View {
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
             HStack {
                 Button("Comment") {
-                    model.addComment(sessionId, file: file.path, side: side,
-                                     line: line, endLine: line, body: draft)
+                    model.addComment(sessionId, file: file.path, side: anchor.side,
+                                     line: anchor.line, endLine: anchor.endLine, body: draft)
                     composing = nil
                     draft = ""
                 }
@@ -390,11 +511,24 @@ private struct FileCard: View {
     }
 }
 
-/// One diff line, clickable on its gutter to start a comment on that side+line.
+/// Collects each diff row's frame (keyed by its global flat index) so the parent's
+/// drag-select gesture can hit-test the cursor against real row geometry.
+private struct RowFramesKey: PreferenceKey {
+    static let defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+/// One diff line. A single click on it starts a single-line comment on that side+line
+/// (3bq behavior); a press-and-drag across rows is handled by the parent's gesture,
+/// which sets `selected` to highlight the spanned lines.
 private struct DiffLineRow: View {
     let line: DiffLine
     /// File path, so the syntax highlighter can pick a per-language profile.
     let path: String
+    /// True while a drag-select spans this row — draws the selection overlay.
+    let selected: Bool
     let onComment: ((side: CommentSide, line: Int)) -> Void
 
     var body: some View {
@@ -408,11 +542,14 @@ private struct DiffLineRow: View {
                 .textSelection(.enabled)
         }
         .background(bgColor)
+        // Selection overlay sits above the add/remove bg and below the syntax text,
+        // so it reads as a distinct range highlight without recoloring the code.
+        .overlay(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture {
             if let a = line.anchor { onComment(a) }
         }
-        .help("Click to comment on this line")
+        .help("Click to comment on this line, or click-drag to select a range")
     }
 
     private func gutter(_ n: Int?) -> some View {

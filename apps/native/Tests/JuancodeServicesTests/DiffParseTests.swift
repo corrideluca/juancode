@@ -94,6 +94,44 @@ final class DiffParseTests: XCTestCase {
         XCTAssertEqual(commentRangeLabel(side: .old, line: 10, endLine: 10), "L10 (old)")
     }
 
+    // MARK: - drag-select hit-testing (juancode-eba)
+
+    func testDiffLineIndexForOffsetMapsAndClamps() {
+        // 5 rows, 20pt tall each: offset 0 → row 0, 25 → row 1, 99 → row 4.
+        XCTAssertEqual(diffLineIndex(forOffset: 0, rowHeight: 20, count: 5), 0)
+        XCTAssertEqual(diffLineIndex(forOffset: 25, rowHeight: 20, count: 5), 1)
+        XCTAssertEqual(diffLineIndex(forOffset: 39, rowHeight: 20, count: 5), 1)
+        XCTAssertEqual(diffLineIndex(forOffset: 40, rowHeight: 20, count: 5), 2)
+        XCTAssertEqual(diffLineIndex(forOffset: 99, rowHeight: 20, count: 5), 4)
+        // Overshoot top/bottom clamps into range.
+        XCTAssertEqual(diffLineIndex(forOffset: -10, rowHeight: 20, count: 5), 0)
+        XCTAssertEqual(diffLineIndex(forOffset: 9999, rowHeight: 20, count: 5), 4)
+    }
+
+    func testDiffLineIndexEdgeCases() {
+        XCTAssertNil(diffLineIndex(forOffset: 10, rowHeight: 20, count: 0))
+        XCTAssertNil(diffLineIndex(forOffset: 10, rowHeight: 0, count: 5))
+    }
+
+    func testNormalizedLineRangeOrdersEndpoints() {
+        XCTAssertEqual(normalizedLineRange(anchor: 2, current: 6), 2...6)
+        XCTAssertEqual(normalizedLineRange(anchor: 6, current: 2), 2...6) // upward drag
+        XCTAssertEqual(normalizedLineRange(anchor: 4, current: 4), 4...4) // single line
+    }
+
+    func testRangeLabelReflectsDraggedRange() {
+        // The label the range composer/comment shows for a 10→14 drag on the new side.
+        XCTAssertEqual(commentRangeLabel(side: .new, line: 10, endLine: 14), "L10–14")
+    }
+
+    func testComposeReviewPromptReflectsRange() {
+        let files = [diffFile("a.swift")]
+        let ranged = DiffComment(id: "1", sessionId: "s", file: "a.swift", side: .new,
+                                 line: 10, endLine: 14, body: "tidy this block", createdAt: 0)
+        let out = composeReviewPrompt(files: files, comments: [ranged], finalNote: "")
+        XCTAssertTrue(out.contains("- L10–14: tidy this block"))
+    }
+
     // MARK: - composeReviewPrompt
 
     private func comment(_ file: String, _ line: Int, _ body: String, side: CommentSide = .new) -> DiffComment {

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import JuancodeCore
 
@@ -115,6 +116,25 @@ private func parseHunkStarts(_ header: String) -> (old: Int, new: Int) {
         }
     }
     return (old, new)
+}
+
+/// Map a vertical drag offset (in points, within the diff line stack's coordinate
+/// space) to the 0-based index of the line row under it, given a uniform per-row
+/// `rowHeight`. Clamps into `[0, count - 1]` so a drag that overshoots the top or
+/// bottom of the stack still resolves to the first/last row. Returns nil only when
+/// there are no rows. Kept pure so the drag-select hit-testing is unit-testable
+/// without a running SwiftUI view (juancode-eba).
+public func diffLineIndex(forOffset y: CGFloat, rowHeight: CGFloat, count: Int) -> Int? {
+    guard count > 0, rowHeight > 0 else { return nil }
+    let raw = Int((y / rowHeight).rounded(.down))
+    return Swift.min(Swift.max(raw, 0), count - 1)
+}
+
+/// Normalize a drag's anchor/current line indices into an ordered, inclusive range,
+/// so dragging upward (current < anchor) yields the same `lower...upper` as dragging
+/// downward. Pure helper for the drag-select gesture (juancode-eba).
+public func normalizedLineRange(anchor: Int, current: Int) -> ClosedRange<Int> {
+    Swift.min(anchor, current)...Swift.max(anchor, current)
 }
 
 /// A human label for a comment's anchored range, e.g. "L10" or "L10–14 (old)".
