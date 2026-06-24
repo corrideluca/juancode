@@ -48,6 +48,8 @@ struct SidebarView: View {
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
+    /// Whether the full-text transcript search sheet is open (juancode-wx9).
+    @State private var showingSearch = false
 
     /// How many archived sessions exist (for the toggle label / visibility).
     private var archivedCount: Int { model.sessions.filter(\.archived).count }
@@ -121,9 +123,16 @@ struct SidebarView: View {
         }
         .toolbar {
             ToolbarItem {
+                Button { showingSearch = true } label: { Image(systemName: "magnifyingglass") }
+                    .help("Search transcripts")
+            }
+            ToolbarItem {
                 Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
                     .help("New session")
             }
+        }
+        .sheet(isPresented: $showingSearch) {
+            SearchPanel()
         }
         .navigationTitle("juancode")
         .alert("Rename session", isPresented: Binding(
