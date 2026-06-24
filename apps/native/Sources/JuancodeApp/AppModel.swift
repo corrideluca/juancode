@@ -445,6 +445,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Spawn the user's real editor (`$VISUAL`/`$EDITOR`, default nvim) on `file`,
+    /// confined to the session's cwd, via an ephemeral pty. Returns the live pty for
+    /// the overlay to render + drive, or nil if there's no cwd or the spawn/path
+    /// check fails (a status note is set on failure). Mirrors the web `openEditor`
+    /// handshake — the native overlay renders the returned pty directly (no WS hop).
+    func openEditor(_ id: String, file: String, cols: Int, rows: Int) -> EphemeralPty? {
+        guard let cwd = cwd(of: id) else {
+            gitNoteBySession[id] = GitNote(ok: false, text: "No working directory for this session.")
+            return nil
+        }
+        do {
+            return try appState.ephemeral.openEditor(cwd: cwd, file: file, cols: cols, rows: rows)
+        } catch {
+            let text: String
+            switch error {
+            case EphemeralPtyError.outsideWorkingDir: text = "File is outside the working directory."
+            case EphemeralPtyError.spawnFailed: text = "Couldn't launch the editor."
+            default: text = String(describing: error)
+            }
+            gitNoteBySession[id] = GitNote(ok: false, text: text)
+            return nil
+        }
+    }
+
     /// Add an inline comment to a session's staging area.
     func addComment(_ id: String, file: String, side: CommentSide, line: Int, endLine: Int, body: String) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)

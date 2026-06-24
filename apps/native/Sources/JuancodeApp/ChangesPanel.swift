@@ -3,6 +3,14 @@ import AppKit
 import JuancodeCore
 import JuancodeServices
 
+/// One open editor overlay: the file being edited and its live ephemeral pty.
+/// `Identifiable` so it can drive a SwiftUI `.sheet(item:)`.
+private struct EditorTarget: Identifiable {
+    let id = UUID()
+    let file: String
+    let pty: EphemeralPty
+}
+
 /// Native SwiftUI port of the web `ChangesPanel` (+ `GitActions`). Shows a session's
 /// working-tree-vs-HEAD diff (file cards with hunks), supports inline line-range
 /// comments staged in-memory and a "Submit review" that injects them into the agent,
@@ -20,6 +28,8 @@ struct ChangesPanel: View {
     /// Closing-note composer for "Submit review".
     @State private var showSubmit = false
     @State private var finalNote = ""
+    /// The file currently open in the editor overlay, if any.
+    @State private var editing: EditorTarget?
 
     private var diff: DiffResult? { model.diff(sessionId) }
     private var loading: Bool { model.diffLoading.contains(sessionId) }
@@ -35,6 +45,30 @@ struct ChangesPanel: View {
             }
         }
         .onAppear { if diff == nil { model.loadChanges(sessionId) } }
+        .sheet(item: $editing) { target in
+            EditorOverlay(
+                file: target.file,
+                pty: target.pty,
+                onExit: { [id = target.id] in Task { @MainActor in closeEditor(id) } },
+                onForceClose: { target.pty.kill(); closeEditor(target.id) })
+        }
+    }
+
+    /// Open `file` in the user's real editor via an ephemeral pty (spawned now so the
+    /// overlay binds a live pty). No-op if the spawn fails (AppModel sets a note).
+    private func openEditor(_ file: String) {
+        guard editing == nil else { return }
+        if let pty = model.openEditor(sessionId, file: file, cols: 80, rows: 24) {
+            editing = EditorTarget(file: file, pty: pty)
+        }
+    }
+
+    /// Dismiss the overlay (idempotent) and refresh the diff, since the editor may
+    /// have changed the file. Mirrors the web `onClose` → refetch.
+    private func closeEditor(_ id: UUID) {
+        guard editing?.id == id else { return }
+        editing = nil
+        model.loadChanges(sessionId)
     }
 
     // MARK: - Header (counts, filter, refresh, git actions)
@@ -108,7 +142,8 @@ struct ChangesPanel: View {
                             file: file,
                             comments: model.comments(sessionId).filter { $0.file == file.path },
                             collapsed: collapsed.contains(file.path),
-                            onToggleCollapse: { toggleCollapse(file.path) })
+                            onToggleCollapse: { toggleCollapse(file.path) },
+                            onEdit: { openEditor(file.path) })
                     }
                 }
                 .padding(10)
@@ -172,6 +207,7 @@ private struct FileCard: View {
     let comments: [DiffComment]
     let collapsed: Bool
     let onToggleCollapse: () -> Void
+    let onEdit: () -> Void
 
     /// The (side, line) a new comment is being composed on, if any.
     @State private var composing: (side: CommentSide, line: Int)?
@@ -215,6 +251,12 @@ private struct FileCard: View {
             Spacer(minLength: 6)
             Text("+\(file.additions)").font(.system(size: 10)).foregroundStyle(.green)
             Text("−\(file.deletions)").font(.system(size: 10)).foregroundStyle(.red)
+            Button(action: onEdit) {
+                Image(systemName: "square.and.pencil").font(.system(size: 10))
+            }
+            .buttonStyle(.borderless).foregroundStyle(.secondary)
+            .disabled(file.status == .deleted)
+            .help(file.status == .deleted ? "File was deleted" : "Open in your editor ($EDITOR)")
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(Color.secondary.opacity(0.08))

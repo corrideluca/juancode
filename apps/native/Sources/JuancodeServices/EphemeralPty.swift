@@ -8,8 +8,8 @@ import JuancodeCore
 /// (inherited verbatim via `PtyProcess`'s `forkpty`+`execvp`) exactly as a normal
 /// terminal would. Output is fanned out as raw bytes, like `Session`.
 public final class EphemeralPty: @unchecked Sendable {
-    public typealias OutputListener = (_ bytes: [UInt8]) -> Void
-    public typealias ExitListener = (_ exitCode: Int?) -> Void
+    public typealias OutputListener = @Sendable (_ bytes: [UInt8]) -> Void
+    public typealias ExitListener = @Sendable (_ exitCode: Int?) -> Void
 
     public let id = UUID().uuidString.lowercased()
 
