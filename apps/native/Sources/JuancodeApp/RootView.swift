@@ -43,14 +43,24 @@ struct SidebarView: View {
 
     /// Free-text filter over folder names/paths + session titles.
     @State private var query = ""
+    /// When off (default) archived sessions are hidden from the list.
+    @State private var showArchived = false
+    /// The session currently being renamed (drives the rename alert).
+    @State private var renaming: SessionMeta?
+    @State private var renameText = ""
 
-    /// Sessions filtered by `query` (case-insensitive over title + cwd), then
-    /// grouped by folder and sorted stably by cwd — mirrors the web sidebar.
+    /// How many archived sessions exist (for the toggle label / visibility).
+    private var archivedCount: Int { model.sessions.filter(\.archived).count }
+
+    /// Sessions filtered by `query` (case-insensitive over title + cwd) and the
+    /// archived toggle, then grouped by folder and sorted stably by cwd — mirrors
+    /// the web sidebar.
     private var groups: [FolderGroup] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let visible = showArchived ? model.sessions : model.sessions.filter { !$0.archived }
         let filtered = q.isEmpty
-            ? model.sessions
-            : model.sessions.filter {
+            ? visible
+            : visible.filter {
                 $0.title.lowercased().contains(q) || $0.cwd.lowercased().contains(q)
             }
         let byCwd = Dictionary(grouping: filtered, by: \.cwd)
@@ -78,6 +88,13 @@ struct SidebarView: View {
                             SessionRow(meta: meta, activity: model.activity(meta.id), live: model.isLive(meta.id))
                                 .tag(meta.id)
                                 .contextMenu {
+                                    Button("Rename…") { beginRename(meta) }
+                                    if meta.archived {
+                                        Button("Unarchive") { model.setArchived(meta.id, false) }
+                                    } else {
+                                        Button("Archive") { model.setArchived(meta.id, true) }
+                                    }
+                                    Divider()
                                     Button("Delete", role: .destructive) { model.delete(meta.id) }
                                 }
                         }
@@ -92,6 +109,15 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            if archivedCount > 0 {
+                Divider()
+                Toggle(isOn: $showArchived) {
+                    Text("Show archived (\(archivedCount))").font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
         }
         .toolbar {
             ToolbarItem {
@@ -100,6 +126,22 @@ struct SidebarView: View {
             }
         }
         .navigationTitle("juancode")
+        .alert("Rename session", isPresented: Binding(
+            get: { renaming != nil },
+            set: { if !$0 { renaming = nil } }
+        )) {
+            TextField("Title", text: $renameText)
+            Button("Cancel", role: .cancel) { renaming = nil }
+            Button("Rename") {
+                if let target = renaming { model.rename(target.id, to: renameText) }
+                renaming = nil
+            }
+        }
+    }
+
+    private func beginRename(_ meta: SessionMeta) {
+        renameText = meta.title
+        renaming = meta
     }
 }
 

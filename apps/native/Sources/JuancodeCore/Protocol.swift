@@ -70,6 +70,9 @@ public struct SessionMeta: Codable, Sendable, Equatable {
     /// run in an existing directory.
     public var worktreePath: String?
     public var usage: SessionUsage?
+    /// Archived sessions are kept in the store but hidden from the default
+    /// sidebar list (reachable via a "Show archived" toggle). Defaults to false.
+    public var archived: Bool
 
     public init(
         id: String,
@@ -83,7 +86,8 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         cliSessionId: String?,
         skipPermissions: Bool,
         worktreePath: String?,
-        usage: SessionUsage?
+        usage: SessionUsage?,
+        archived: Bool = false
     ) {
         self.id = id
         self.provider = provider
@@ -97,6 +101,26 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         self.skipPermissions = skipPermissions
         self.worktreePath = worktreePath
         self.usage = usage
+        self.archived = archived
+    }
+
+    // Custom decode so payloads predating `archived` (older db rows / wire
+    // messages from a Node peer that doesn't model it) still decode cleanly.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        provider = try c.decode(ProviderId.self, forKey: .provider)
+        cwd = try c.decode(String.self, forKey: .cwd)
+        title = try c.decode(String.self, forKey: .title)
+        status = try c.decode(SessionStatus.self, forKey: .status)
+        exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode)
+        createdAt = try c.decode(Int.self, forKey: .createdAt)
+        updatedAt = try c.decode(Int.self, forKey: .updatedAt)
+        cliSessionId = try c.decodeIfPresent(String.self, forKey: .cliSessionId)
+        skipPermissions = try c.decode(Bool.self, forKey: .skipPermissions)
+        worktreePath = try c.decodeIfPresent(String.self, forKey: .worktreePath)
+        usage = try c.decodeIfPresent(SessionUsage.self, forKey: .usage)
+        archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
     }
 }
 

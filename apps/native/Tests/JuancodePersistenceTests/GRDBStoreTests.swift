@@ -109,6 +109,56 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.get("done")?.status, .exited)
     }
 
+    // MARK: - rename + archive (juancode-211)
+
+    func testSetTitlePersistsAndSyncsFts() {
+        let m = meta("r1", title: "original")
+        store.insert(m)
+        store.update(m, scrollback: Array("haystack needle".utf8))
+
+        store.setTitle("r1", title: "Renamed widget")
+        XCTAssertEqual(store.get("r1")?.title, "Renamed widget")
+        // Scrollback untouched by a rename.
+        XCTAssertEqual(store.getScrollback("r1"), Array("haystack needle".utf8))
+        // FTS reflects the new title and still indexes the scrollback.
+        XCTAssertEqual(store.search("widget", limit: 10).map(\.meta.id), ["r1"])
+        XCTAssertEqual(store.search("needle", limit: 10).map(\.meta.id), ["r1"])
+        XCTAssertTrue(store.search("original", limit: 10).isEmpty)
+    }
+
+    func testArchivedDefaultsFalseAndRoundTrips() {
+        let m = meta("a1")
+        store.insert(m)
+        XCTAssertEqual(store.get("a1")?.archived, false)
+
+        store.setArchived("a1", archived: true)
+        XCTAssertEqual(store.get("a1")?.archived, true)
+
+        store.setArchived("a1", archived: false)
+        XCTAssertEqual(store.get("a1")?.archived, false)
+    }
+
+    func testArchivedPersistsThroughUpdate() {
+        var m = meta("a2")
+        m.archived = true
+        store.insert(m)
+        XCTAssertEqual(store.get("a2")?.archived, true)
+
+        // A normal meta update keeps the flag.
+        store.update(m, scrollback: Array("x".utf8))
+        XCTAssertEqual(store.get("a2")?.archived, true)
+    }
+
+    func testArchivedSurvivesReopen() throws {
+        var m = meta("a3")
+        m.archived = true
+        store.insert(m)
+        store = nil
+
+        let reopened = try GRDBStore(path: path)
+        XCTAssertEqual(reopened.get("a3")?.archived, true)
+    }
+
     // MARK: - search (FTS5)
 
     func testSearchMatchesTitleAndScrollback() {

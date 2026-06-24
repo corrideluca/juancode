@@ -332,6 +332,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Rename a session. Trims the input; an empty name is ignored. Updates the
+    /// live pty's meta when running (which persists + pins the title against the
+    /// CLI-title poll), otherwise writes straight to the store.
+    func rename(_ id: String, to title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let s = appState.registry.get(id) {
+            s.setTitle(trimmed)
+        } else {
+            appState.store.setTitle(id, title: trimmed)
+        }
+        refresh()
+    }
+
+    /// Archive or unarchive a session. Persists the flag (via the live session
+    /// when running) and clears the selection when hiding the selected one.
+    func setArchived(_ id: String, _ archived: Bool) {
+        if let s = appState.registry.get(id) {
+            s.setArchived(archived)
+        } else {
+            appState.store.setArchived(id, archived: archived)
+        }
+        if archived, selection == id { selection = nil }
+        refresh()
+    }
+
     func delete(_ id: String) {
         let meta = appState.store.get(id)
         appState.registry.get(id)?.kill()

@@ -7,6 +7,11 @@ public protocol SessionStore: AnyObject, Sendable {
     func insert(_ meta: SessionMeta)
     func update(_ meta: SessionMeta, scrollback: [UInt8])
     func setCliSessionId(_ id: String, cliSessionId: String)
+    /// Rename a session: persist a new title (also refreshes the FTS index).
+    func setTitle(_ id: String, title: String)
+    /// Archive / unarchive a session: hides it from the default sidebar list
+    /// while keeping its row + scrollback intact.
+    func setArchived(_ id: String, archived: Bool)
     /// Persisted scrollback for `id`, used to seed a resumed pty so history
     /// carries forward across reactivation.
     func getScrollback(_ id: String) -> [UInt8]?
@@ -65,6 +70,26 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
         lock.withLock {
             if var m = metas[id] {
                 m.cliSessionId = cliSessionId
+                metas[id] = m
+            }
+        }
+    }
+
+    public func setTitle(_ id: String, title: String) {
+        lock.withLock {
+            if var m = metas[id] {
+                m.title = title
+                m.updatedAt = nowMs()
+                metas[id] = m
+            }
+        }
+    }
+
+    public func setArchived(_ id: String, archived: Bool) {
+        lock.withLock {
+            if var m = metas[id] {
+                m.archived = archived
+                m.updatedAt = nowMs()
                 metas[id] = m
             }
         }

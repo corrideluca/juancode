@@ -74,6 +74,10 @@ public final class Session: @unchecked Sendable {
     private let titlePollMs = 4000
     private var titleTimer: DispatchSourceTimer?
 
+    /// Set once the user renames the session manually, so the CLI-derived title
+    /// poll stops clobbering their chosen name.
+    private var titleIsManual = false
+
     public var meta: SessionMeta { lock.withLock { _meta } }
     public var id: String { lock.withLock { _meta.id } }
     public var isRunning: Bool { lock.withLock { _meta.status == .running } }
@@ -319,9 +323,32 @@ public final class Session: @unchecked Sendable {
         }
     }
 
+    /// Rename the live session: persist a new title and pin it so the CLI-derived
+    /// title poll won't overwrite the user's choice. No-op for an unchanged name.
+    public func setTitle(_ title: String) {
+        let changed = lock.withLock { () -> Bool in
+            titleIsManual = true
+            guard title != _meta.title else { return false }
+            _meta.title = title
+            return true
+        }
+        if changed { persistNow() }
+    }
+
+    /// Archive / unarchive the live session and persist the flag.
+    public func setArchived(_ archived: Bool) {
+        let changed = lock.withLock { () -> Bool in
+            guard archived != _meta.archived else { return false }
+            _meta.archived = archived
+            return true
+        }
+        if changed { persistNow() }
+    }
+
     /// Read the CLI's generated title (or first prompt) and persist if changed.
     private func refreshTitle() async {
-        let (cliSessionId, provider) = lock.withLock { (_meta.cliSessionId, _meta.provider) }
+        let (cliSessionId, provider, manual) = lock.withLock { (_meta.cliSessionId, _meta.provider, titleIsManual) }
+        guard !manual else { return } // user renamed it — don't clobber
         guard let cliSessionId else { return } // Codex id not discovered yet
         guard let title = await env.deriveTitle(provider, cliSessionId) else { return }
         let changed = lock.withLock { () -> Bool in

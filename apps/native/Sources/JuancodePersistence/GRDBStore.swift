@@ -51,6 +51,7 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
                     skip_permissions INTEGER NOT NULL DEFAULT 0,
                     worktree_path    TEXT,
                     usage            TEXT,
+                    archived         INTEGER NOT NULL DEFAULT 0,
                     created_at       INTEGER NOT NULL,
                     updated_at       INTEGER NOT NULL
                 );
@@ -70,6 +71,9 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
             }
             if !cols.contains("usage") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN usage TEXT")
+            }
+            if !cols.contains("archived") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             }
 
             try db.execute(sql: """
@@ -135,7 +139,8 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
             cliSessionId: r["cli_session_id"],
             skipPermissions: (r["skip_permissions"] as Int) == 1,
             worktreePath: r["worktree_path"],
-            usage: Self.decodeUsage(r["usage"])
+            usage: Self.decodeUsage(r["usage"]),
+            archived: (r["archived"] as Int? ?? 0) == 1
         )
     }
 
@@ -169,12 +174,13 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
         try? dbQueue.write { db in
             try db.execute(sql: """
                 INSERT INTO sessions (id, provider, cwd, title, status, exit_code, cli_session_id,
-                                      scrollback, skip_permissions, worktree_path, usage, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                                      scrollback, skip_permissions, worktree_path, usage, archived, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     meta.id, meta.provider.rawValue, meta.cwd, meta.title, meta.status.rawValue,
                     meta.exitCode, meta.cliSessionId, meta.skipPermissions ? 1 : 0,
-                    meta.worktreePath, Self.encodeUsage(meta.usage), meta.createdAt, meta.updatedAt,
+                    meta.worktreePath, Self.encodeUsage(meta.usage), meta.archived ? 1 : 0,
+                    meta.createdAt, meta.updatedAt,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: "")
         }
@@ -186,12 +192,12 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?, scrollback = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId, text,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.updatedAt, meta.id,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: text)
         }
@@ -202,6 +208,28 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
             try db.execute(
                 sql: "UPDATE sessions SET cli_session_id = ? WHERE id = ?",
                 arguments: [cliSessionId, id]
+            )
+        }
+    }
+
+    public func setTitle(_ id: String, title: String) {
+        try? dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                arguments: [title, nowMs(), id]
+            )
+            // Keep the FTS title in sync without touching the stored scrollback.
+            let scroll = try String.fetchOne(
+                db, sql: "SELECT scrollback FROM sessions WHERE id = ?", arguments: [id]) ?? ""
+            try syncFts(db, id: id, title: title, scrollback: scroll)
+        }
+    }
+
+    public func setArchived(_ id: String, archived: Bool) {
+        try? dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?",
+                arguments: [archived ? 1 : 0, nowMs(), id]
             )
         }
     }
