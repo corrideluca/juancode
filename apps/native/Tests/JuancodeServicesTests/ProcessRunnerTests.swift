@@ -1,0 +1,71 @@
+import XCTest
+@testable import JuancodeServices
+
+final class ProcessRunnerTests: XCTestCase {
+    func testCapturesStdout() async throws {
+        let r = try await ProcessRunner.run("/bin/echo", ["hello world"])
+        XCTAssertEqual(r.stdout.trimmingCharacters(in: .newlines), "hello world")
+        XCTAssertTrue(r.ok)
+    }
+
+    func testCaptureReturnsNonZeroWithoutThrowing() async throws {
+        let r = try await ProcessRunner.capture("/bin/sh", ["-c", "echo out; echo err 1>&2; exit 3"])
+        XCTAssertEqual(r.exitCode, 3)
+        XCTAssertEqual(r.stdout.trimmingCharacters(in: .newlines), "out")
+        XCTAssertEqual(r.stderr.trimmingCharacters(in: .newlines), "err")
+        XCTAssertFalse(r.ok)
+    }
+
+    func testRunThrowsOnNonZeroExit() async {
+        do {
+            _ = try await ProcessRunner.run("/bin/sh", ["-c", "exit 1"])
+            XCTFail("expected throw")
+        } catch let e as ProcessError {
+            XCTAssertEqual(e.code, 1)
+            XCTAssertFalse(e.launchFailed)
+            XCTAssertFalse(e.timedOut)
+        } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    func testLaunchFailureForMissingBinary() async {
+        do {
+            _ = try await ProcessRunner.run("/no/such/binary-xyz", [])
+            XCTFail("expected throw")
+        } catch let e as ProcessError {
+            XCTAssertTrue(e.launchFailed)
+        } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    func testBareCommandResolvesViaPath() async throws {
+        // No leading slash → resolved through /usr/bin/env against inherited PATH.
+        let r = try await ProcessRunner.run("echo", ["hi"])
+        XCTAssertEqual(r.stdout.trimmingCharacters(in: .newlines), "hi")
+    }
+
+    func testTimeoutTerminates() async {
+        do {
+            _ = try await ProcessRunner.run("/bin/sh", ["-c", "sleep 5"], timeout: 0.2)
+            XCTFail("expected timeout")
+        } catch let e as ProcessError {
+            XCTAssertTrue(e.timedOut)
+        } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    func testStdinIsForwarded() async throws {
+        let r = try await ProcessRunner.run("/bin/cat", [], stdin: "piped input")
+        XCTAssertEqual(r.stdout, "piped input")
+    }
+
+    func testCwdIsApplied() async throws {
+        let r = try await ProcessRunner.run("/bin/pwd", [], cwd: "/tmp")
+        // /tmp is a symlink to /private/tmp on macOS; just assert it resolved somewhere.
+        XCTAssertTrue(r.stdout.contains("tmp"))
+    }
+
+    func testEnvironmentIsInherited() async throws {
+        setenv("JUANCODE_TEST_VAR", "inherited-value", 1)
+        defer { unsetenv("JUANCODE_TEST_VAR") }
+        let r = try await ProcessRunner.run("/bin/sh", ["-c", "printf %s \"$JUANCODE_TEST_VAR\""])
+        XCTAssertEqual(r.stdout, "inherited-value")
+    }
+}

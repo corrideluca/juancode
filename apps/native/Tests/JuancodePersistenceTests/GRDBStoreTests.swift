@@ -1,0 +1,209 @@
+import XCTest
+@testable import JuancodePersistence
+import JuancodeCore
+
+final class GRDBStoreTests: XCTestCase {
+    private var path: String!
+    private var store: GRDBStore!
+
+    override func setUpWithError() throws {
+        let dir = NSTemporaryDirectory() as NSString
+        path = dir.appendingPathComponent("juancode-test-\(UUID().uuidString).db")
+        store = try GRDBStore(path: path)
+    }
+
+    override func tearDownWithError() throws {
+        store = nil
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: path + suffix)
+        }
+    }
+
+    private func meta(
+        _ id: String = UUID().uuidString.lowercased(),
+        title: String = "Claude · juancode",
+        status: SessionStatus = .running,
+        cliSessionId: String? = nil,
+        createdAt: Int = nowMs(),
+        usage: SessionUsage? = nil
+    ) -> SessionMeta {
+        SessionMeta(
+            id: id, provider: .claude, cwd: "/tmp/work", title: title, status: status,
+            exitCode: nil, createdAt: createdAt, updatedAt: createdAt,
+            cliSessionId: cliSessionId, skipPermissions: false, worktreePath: nil, usage: usage
+        )
+    }
+
+    func testInsertAndGet() {
+        let m = meta()
+        store.insert(m)
+        let got = store.get(m.id)
+        XCTAssertEqual(got, m)
+    }
+
+    func testGetMissingReturnsNil() {
+        XCTAssertNil(store.get("nope"))
+    }
+
+    func testListOrdersNewestFirst() {
+        let a = meta("a", createdAt: 1000)
+        let b = meta("b", createdAt: 3000)
+        let c = meta("c", createdAt: 2000)
+        store.insert(a); store.insert(b); store.insert(c)
+        XCTAssertEqual(store.list().map(\.id), ["b", "c", "a"])
+    }
+
+    func testUpdatePersistsScrollbackAndMeta() {
+        var m = meta()
+        store.insert(m)
+        m.title = "renamed"
+        m.status = .exited
+        m.exitCode = 0
+        let bytes: [UInt8] = Array("hello \u{1B}[31mworld\u{1B}[0m".utf8)
+        store.update(m, scrollback: bytes)
+
+        let got = store.get(m.id)
+        XCTAssertEqual(got?.title, "renamed")
+        XCTAssertEqual(got?.status, .exited)
+        XCTAssertEqual(got?.exitCode, 0)
+        XCTAssertEqual(store.getScrollback(m.id), bytes)
+    }
+
+    func testUsageRoundTrips() {
+        let usage = SessionUsage(inputTokens: 10, outputTokens: 20, cacheReadTokens: 5,
+                                 cacheWriteTokens: 1, totalTokens: 36, costUsd: 0.0123)
+        var m = meta(usage: usage)
+        store.insert(m)
+        store.update(m, scrollback: [])
+        XCTAssertEqual(store.get(m.id)?.usage, usage)
+    }
+
+    func testSetCliSessionIdAndUsedIds() {
+        let m = meta()
+        store.insert(m)
+        XCTAssertTrue(store.usedCliSessionIds().isEmpty)
+        store.setCliSessionId(m.id, cliSessionId: "cli-123")
+        XCTAssertEqual(store.get(m.id)?.cliSessionId, "cli-123")
+        XCTAssertEqual(store.usedCliSessionIds(), ["cli-123"])
+    }
+
+    func testDeleteCascadesCommentsAndReview() {
+        let m = meta()
+        store.insert(m)
+        store.addComment(DiffComment(id: "c1", sessionId: m.id, file: "a.ts", side: .new,
+                                     line: 1, endLine: 1, body: "hi", createdAt: nowMs()))
+        store.saveReview(m.id, ReviewResult(status: .ok, findings: [], summary: "ok", createdAt: nowMs()))
+
+        XCTAssertTrue(store.delete(m.id))
+        XCTAssertNil(store.get(m.id))
+        XCTAssertTrue(store.listComments(m.id).isEmpty)
+        XCTAssertNil(store.getReview(m.id))
+        XCTAssertFalse(store.delete(m.id)) // already gone
+    }
+
+    func testMarkOrphansExited() {
+        store.insert(meta("running", status: .running))
+        store.insert(meta("done", status: .exited))
+        store.markOrphansExited()
+        XCTAssertEqual(store.get("running")?.status, .exited)
+        XCTAssertEqual(store.get("done")?.status, .exited)
+    }
+
+    // MARK: - search (FTS5)
+
+    func testSearchMatchesTitleAndScrollback() {
+        let a = meta("a", title: "Refactor the parser")
+        store.insert(a)
+        store.update(a, scrollback: Array("nothing relevant here".utf8))
+
+        let b = meta("b", title: "Unrelated")
+        store.insert(b)
+        store.update(b, scrollback: Array("the quick brown parser fox".utf8))
+
+        let hits = store.search("parser", limit: 50)
+        XCTAssertEqual(Set(hits.map(\.meta.id)), ["a", "b"])
+        XCTAssertFalse(hits.first { $0.meta.id == "b" }!.snippet.isEmpty)
+    }
+
+    func testSearchPrefixAndAnd() {
+        let a = meta("a", title: "deploy pipeline broken")
+        store.insert(a)
+        store.update(a, scrollback: [])
+        // prefix match: "pipe" -> "pipeline"; AND of both tokens
+        XCTAssertEqual(store.search("deploy pipe", limit: 10).map(\.meta.id), ["a"])
+        XCTAssertTrue(store.search("deploy missing", limit: 10).isEmpty)
+    }
+
+    func testSearchBlankReturnsEmpty() {
+        store.insert(meta("a", title: "x"))
+        XCTAssertTrue(store.search("   ", limit: 10).isEmpty)
+    }
+
+    func testToFtsMatchEscapesQuotes() {
+        XCTAssertEqual(GRDBStore.toFtsMatch("foo bar"), "\"foo\"* AND \"bar\"*")
+        XCTAssertEqual(GRDBStore.toFtsMatch("  spaced   out "), "\"spaced\"* AND \"out\"*")
+        XCTAssertEqual(GRDBStore.toFtsMatch("a\"b"), "\"a\"\"b\"*")
+        XCTAssertEqual(GRDBStore.toFtsMatch("   "), "")
+    }
+
+    func testSearchToleratesStrayOperators() {
+        let a = meta("a", title: "AND OR NEAR weirdness")
+        store.insert(a)
+        store.update(a, scrollback: [])
+        // Should not throw / should treat operators as literals.
+        XCTAssertEqual(store.search("weirdness", limit: 10).map(\.meta.id), ["a"])
+        XCTAssertNoThrow(store.search("\"unbalanced", limit: 10))
+    }
+
+    // MARK: - comments
+
+    func testCommentsAddListOrderRemoveClear() {
+        let sid = "s1"
+        store.insert(meta(sid))
+        let c1 = DiffComment(id: "1", sessionId: sid, file: "a", side: .new, line: 2, endLine: 3, body: "two", createdAt: 200)
+        let c2 = DiffComment(id: "2", sessionId: sid, file: "b", side: .old, line: 1, endLine: 1, body: "one", createdAt: 100)
+        store.addComment(c1)
+        store.addComment(c2)
+        XCTAssertEqual(store.listComments(sid).map(\.id), ["2", "1"]) // created_at ASC
+        XCTAssertEqual(store.listComments(sid).first, c2)
+
+        XCTAssertTrue(store.removeComment(sid, "2"))
+        XCTAssertFalse(store.removeComment(sid, "2"))
+        XCTAssertFalse(store.removeComment("other", "1"))
+        XCTAssertEqual(store.listComments(sid).map(\.id), ["1"])
+
+        XCTAssertEqual(store.clearComments(sid), 1)
+        XCTAssertTrue(store.listComments(sid).isEmpty)
+    }
+
+    // MARK: - reviews
+
+    func testReviewSaveOverwriteGet() {
+        let sid = "s1"
+        store.insert(meta(sid))
+        XCTAssertNil(store.getReview(sid))
+
+        let r1 = ReviewResult(status: .ok, findings: [
+            ReviewFinding(file: "a.ts", side: .new, line: 5, severity: .high, title: "bug", note: "fix it")
+        ], summary: "one finding", createdAt: 100)
+        store.saveReview(sid, r1)
+        XCTAssertEqual(store.getReview(sid), r1)
+
+        let r2 = ReviewResult(status: .empty, findings: [], summary: nil, createdAt: 200)
+        store.saveReview(sid, r2)
+        XCTAssertEqual(store.getReview(sid), r2)
+    }
+
+    // MARK: - persistence across reopen
+
+    func testDataSurvivesReopen() throws {
+        let m = meta("persist")
+        store.insert(m)
+        store.update(m, scrollback: Array("scroll".utf8))
+        store = nil
+
+        let reopened = try GRDBStore(path: path)
+        XCTAssertEqual(reopened.get("persist")?.id, "persist")
+        XCTAssertEqual(reopened.getScrollback("persist"), Array("scroll".utf8))
+    }
+}

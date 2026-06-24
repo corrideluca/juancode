@@ -1,0 +1,142 @@
+import Foundation
+import Testing
+@testable import JuancodeCore
+
+/// Integration tests for the pty host + fan-out (juancode-u34.2). We spawn a real
+/// temp script through a fake `BinaryResolver`, so no claude/codex install needed.
+@Suite struct SessionRegistryTests {
+    struct FakeResolver: BinaryResolver {
+        let path: String
+        func command(for provider: ProviderId) -> String { path }
+    }
+
+    final class ByteSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = [UInt8]()
+        func add(_ b: [UInt8]) { lock.withLock { data += b } }
+        var text: String { lock.withLock { String(decoding: data, as: UTF8.self) } }
+    }
+
+    private func makeScript(_ body: String) -> String {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("juancode-test-\(UUID().uuidString).sh")
+        try! ("#!/bin/bash\n" + body).write(to: url, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url.path
+    }
+
+    private func env(script: String, store: SessionStore = InMemorySessionStore()) -> SessionEnvironment {
+        SessionEnvironment(
+            resolver: FakeResolver(path: script),
+            store: store,
+            scrollbackLimit: 256 * 1024,
+            discoverCodexId: { _, _ in nil } // never block in tests
+        )
+    }
+
+    private func poll(_ timeout: TimeInterval = 3.0, _ cond: @escaping () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if cond() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private var cwd: String { FileManager.default.temporaryDirectory.path }
+
+    @Test func spawnsAndFansOutToManySubscribers() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        let a = ByteSink(), b = ByteSink()
+        s.subscribeOutput { a.add($0) }
+        s.subscribeOutput { b.add($0) }
+
+        await poll { a.text.contains("READY") && b.text.contains("READY") }
+        #expect(a.text.contains("READY"))
+        #expect(b.text.contains("READY"))
+    }
+
+    @Test func lateSubscriberGetsScrollbackReplay() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        await poll { s.getScrollback().count > 0 }
+        let late = ByteSink()
+        s.subscribeOutput(replay: true) { late.add($0) }
+        // Replay is synchronous on subscribe, so it's already here.
+        #expect(late.text.contains("READY"))
+    }
+
+    @Test func keystrokesReachTheChild() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        let sink = ByteSink()
+        s.subscribeOutput { sink.add($0) }
+        await poll { sink.text.contains("READY") }
+        s.write("ping\n")
+        await poll { sink.text.contains("ping") } // pty echo + cat
+        #expect(sink.text.contains("ping"))
+    }
+
+    @Test func killTransitionsToExitedAndNotifies() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        let exited = ByteSink() // reuse as a flag carrier
+        s.onExit { _ in exited.add(Array("X".utf8)) }
+
+        await poll { s.getScrollback().count > 0 }
+        s.kill()
+        await poll { !s.isRunning }
+        #expect(!s.isRunning)
+        #expect(s.meta.status == .exited)
+        await poll { !exited.text.isEmpty }
+        #expect(!exited.text.isEmpty)
+    }
+
+    @Test func exitCodeIsCaptured() async throws {
+        let store = InMemorySessionStore()
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'bye\\n'\nexit 3\n"), store: store))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        let id = s.id
+
+        // Status flips before persistNow() runs, so poll the persisted copy too.
+        await poll { s.meta.exitCode == 3 && store.meta(id)?.exitCode == 3 }
+        #expect(s.meta.exitCode == 3)
+        #expect(store.meta(id)?.exitCode == 3)
+    }
+
+    @Test func registryTracksThenDropsOnExit() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'done\\n'\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        let id = s.id
+        #expect(reg.get(id) != nil)
+
+        await poll { reg.get(id) == nil }
+        #expect(reg.get(id) == nil)
+        #expect(reg.all().isEmpty)
+    }
+
+    @Test func claudePinsCliSessionIdAndStoreInsertsOnCreate() async throws {
+        let store = InMemorySessionStore()
+        // Claude's startArgs prepend --session-id <id>; the script ignores them.
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n"), store: store))
+        let s = try reg.create(provider: .claude, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+        #expect(s.meta.cliSessionId == s.id) // pinned up front
+        #expect(store.meta(s.id) != nil)     // inserted on create
+    }
+
+    @Test func onCreateFiresForNewSessions() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n")))
+        let seen = ByteSink()
+        reg.onCreate { seen.add(Array($0.id.utf8)) }
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+        #expect(seen.text == s.id)
+    }
+}
