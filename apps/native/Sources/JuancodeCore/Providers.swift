@@ -99,6 +99,36 @@ public protocol BinaryResolver: Sendable {
 /// environment is the whole point — we never inject a shadow HOME/PATH.
 public func resolveBin(_ cmd: String, override: String?) -> String {
     if let override, !override.isEmpty { return override }
+
+    // Fast path: resolve against the inherited PATH directly, no subprocess. When
+    // juancode is launched from a terminal it already has the user's full PATH, so
+    // this finds claude/codex instantly — and avoids spawning the user's login
+    // shell at all (a slow or hanging interactive rc must never wedge a spawn).
+    if let direct = lookupInPath(cmd) { return direct }
+
+    // Fallback (e.g. launched from Finder with a stripped PATH): ask the login
+    // shell where the command is, but cap it with a timeout so a slow/hanging rc
+    // can't block — falling back to the bare name (execvp resolves it via PATH).
+    if let viaShell = lookupViaLoginShell(cmd, timeout: 5) { return viaShell }
+
+    return cmd
+}
+
+/// Search the process's inherited `PATH` for an executable named `cmd`.
+private func lookupInPath(_ cmd: String) -> String? {
+    if cmd.contains("/") { return cmd } // already a path
+    guard let path = ProcessInfo.processInfo.environment["PATH"], !path.isEmpty else { return nil }
+    let fm = FileManager.default
+    for dir in path.split(separator: ":") where !dir.isEmpty {
+        let full = "\(dir)/\(cmd)"
+        if fm.isExecutableFile(atPath: full) { return full }
+    }
+    return nil
+}
+
+/// Resolve `cmd` via the user's login+interactive shell (so `.zshrc` PATH edits
+/// apply), bounded by `timeout` seconds. Returns nil on timeout/failure.
+private func lookupViaLoginShell(_ cmd: String, timeout: TimeInterval) -> String? {
     let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: shell)
@@ -106,21 +136,25 @@ public func resolveBin(_ cmd: String, override: String?) -> String {
     let pipe = Pipe()
     proc.standardOutput = pipe
     proc.standardError = FileHandle.nullDevice
-    do {
-        try proc.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        let out = String(data: data, encoding: .utf8) ?? ""
-        let resolved = out
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .last { !$0.isEmpty }
-        if let resolved, resolved.hasPrefix("/") { return resolved }
-    } catch {
-        // Login-shell resolution failed — fall back to the bare command name and
-        // let PATH / execvp handle it.
+    // Non-tty stdin so an interactive shell doesn't start its line editor (ZLE)
+    // and grab the terminal.
+    proc.standardInput = FileHandle.nullDevice
+
+    let sem = DispatchSemaphore(value: 0)
+    proc.terminationHandler = { _ in sem.signal() }
+    do { try proc.run() } catch { return nil }
+
+    if sem.wait(timeout: .now() + timeout) == .timedOut {
+        proc.terminate()
+        return nil
     }
-    return cmd
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    let out = String(data: data, encoding: .utf8) ?? ""
+    let resolved = out
+        .split(separator: "\n")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .last { !$0.isEmpty }
+    return (resolved?.hasPrefix("/") == true) ? resolved : nil
 }
 
 /// Default resolver honouring `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN`.

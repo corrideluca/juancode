@@ -66,9 +66,16 @@ final class AppModel: ObservableObject {
                 workCwd = wt.path
                 worktreePath = wt.path
             }
-            let s = try appState.registry.create(
-                provider: provider, cwd: workCwd, cols: 80, rows: 24,
-                opts: SpawnOptions(skipPermissions: skipPermissions), worktreePath: worktreePath)
+            // Spawn off the main actor: this resolves the CLI via a login shell and
+            // forkpty()s — work that must never block the UI run loop.
+            let state = appState
+            let cwdToUse = workCwd
+            let wt = worktreePath
+            let s = try await Task.detached(priority: .userInitiated) {
+                try state.registry.create(
+                    provider: provider, cwd: cwdToUse, cols: 80, rows: 24,
+                    opts: SpawnOptions(skipPermissions: skipPermissions), worktreePath: wt)
+            }.value
             refresh()
             selection = s.id
             return true

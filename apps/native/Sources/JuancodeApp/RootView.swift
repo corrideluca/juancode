@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 import JuancodeCore
 
 struct RootView: View {
@@ -147,6 +148,7 @@ struct NewSessionView: View {
     @State private var skipPermissions = false
     @State private var isolateWorktree = false
     @State private var creating = false
+    @State private var showingDirPicker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -159,7 +161,7 @@ struct NewSessionView: View {
                 }
                 HStack {
                     TextField("Working directory", text: $cwd)
-                    Button("Choose…") { chooseDir() }
+                    Button("Choose…") { showingDirPicker = true }
                 }
                 Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
                 Toggle("Isolate in a fresh git worktree", isOn: $isolateWorktree)
@@ -174,15 +176,15 @@ struct NewSessionView: View {
         }
         .padding(20)
         .frame(width: 480)
-    }
-
-    @MainActor
-    private func chooseDir() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.directoryURL = URL(fileURLWithPath: cwd)
-        if panel.runModal() == .OK, let url = panel.url { cwd = url.path }
+        // SwiftUI's native folder picker — unlike NSOpenPanel.runModal(), it does
+        // not spin a nested modal run loop inside the sheet (which deadlocks).
+        .fileImporter(isPresented: $showingDirPicker, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result {
+                let needsScope = url.startAccessingSecurityScopedResource()
+                cwd = url.path
+                if needsScope { url.stopAccessingSecurityScopedResource() }
+            }
+        }
     }
 
     private func start() {
