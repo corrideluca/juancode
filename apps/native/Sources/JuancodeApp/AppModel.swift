@@ -358,6 +358,160 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
+    // MARK: - Changes panel (working-tree diff + inline comments + git actions) — juancode-3bq
+
+    /// Per-session working-tree diff cache, loaded lazily by the ChangesPanel and
+    /// refreshed on demand. Mirrors the web's per-session `useQuery(["diff", …])`.
+    @Published var diffBySession: [String: DiffResult] = [:]
+    /// Per-session git state (branch / ahead / dirty / remote) backing the git CTAs.
+    @Published var gitStateBySession: [String: GitState] = [:]
+    /// Per-session inline review comments. Held in-memory (in-process, no server
+    /// round-trip) — they're a staging area pasted into the agent on "submit".
+    @Published var commentsBySession: [String: [DiffComment]] = [:]
+    /// Sessions whose diff is currently loading, so the panel can show a spinner.
+    @Published var diffLoading: Set<String> = []
+    /// A transient git-action status line per session (commit/push result or error).
+    @Published var gitNoteBySession: [String: GitNote] = [:]
+
+    private var diffInFlight: Set<String> = []
+
+    struct GitNote: Equatable { var ok: Bool; var text: String }
+
+    func diff(_ id: String) -> DiffResult? { diffBySession[id] }
+    func gitState(_ id: String) -> GitState? { gitStateBySession[id] }
+    func comments(_ id: String) -> [DiffComment] { commentsBySession[id] ?? [] }
+
+    /// The cwd a session's changes panel operates on (its own working directory).
+    private func cwd(of id: String) -> String? {
+        liveSession(id)?.meta.cwd ?? appState.store.get(id)?.cwd
+    }
+
+    /// Load (or refresh) the working-tree diff + git state for a session, off the
+    /// main actor (both shell out to git). Coalesces concurrent calls. Mirrors
+    /// `loadPrs`.
+    func loadChanges(_ id: String) {
+        guard let cwd = cwd(of: id), !diffInFlight.contains(id) else { return }
+        diffInFlight.insert(id)
+        diffLoading.insert(id)
+        Task {
+            async let d = Task.detached(priority: .utility) { try? await getDiff(cwd) }.value
+            async let g = Task.detached(priority: .utility) { await getGitState(cwd) }.value
+            let (diff, state) = await (d, g)
+            if let diff { diffBySession[id] = diff }
+            gitStateBySession[id] = state
+            diffLoading.remove(id)
+            diffInFlight.remove(id)
+        }
+    }
+
+    /// Add an inline comment to a session's staging area.
+    func addComment(_ id: String, file: String, side: CommentSide, line: Int, endLine: Int, body: String) {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let c = DiffComment(
+            id: UUID().uuidString, sessionId: id, file: file, side: side,
+            line: min(line, endLine), endLine: max(line, endLine),
+            body: trimmed, createdAt: Int(Date().timeIntervalSince1970 * 1000))
+        commentsBySession[id, default: []].append(c)
+    }
+
+    /// Remove a staged inline comment.
+    func deleteComment(_ id: String, commentId: String) {
+        commentsBySession[id]?.removeAll { $0.id == commentId }
+    }
+
+    /// Submit the batched review: compose the comments (+ closing note) into one
+    /// prompt and inject it into the session as if typed, then clear them. Mirrors
+    /// the web "Submit review" (which bracket-pastes into the pty); here we write it
+    /// straight to the live session. No-op without a live session.
+    func submitReview(_ id: String, finalNote: String) {
+        guard let session = liveSession(id) else {
+            gitNoteBySession[id] = GitNote(ok: false, text: "Session isn't live — can't send review.")
+            return
+        }
+        let files = diffBySession[id]?.files ?? []
+        let prompt = composeReviewPrompt(files: files, comments: comments(id), finalNote: finalNote)
+        guard !prompt.isEmpty else { return }
+        // Write as if typed (idle → runs, busy → queued by the CLI). The user
+        // reviews the multi-line prompt and presses Enter to send.
+        session.write(prompt)
+        commentsBySession[id] = []
+    }
+
+    /// Stage everything and commit, off the main actor. Refreshes the diff + git
+    /// state and surfaces a status note on success/failure. Mirrors the web commit
+    /// mutation in GitActions.
+    func commit(_ id: String, message: String) async {
+        guard let cwd = cwd(of: id) else { return }
+        let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !msg.isEmpty else { return }
+        do {
+            let r = try await Task.detached(priority: .userInitiated) {
+                try await commitAll(cwd, msg)
+            }.value
+            gitNoteBySession[id] = GitNote(ok: true, text: "Committed \(r.sha) · \(r.subject)")
+            loadChanges(id)
+        } catch {
+            gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
+        }
+    }
+
+    /// Push the current branch, off the main actor.
+    func push(_ id: String) async {
+        guard let cwd = cwd(of: id) else { return }
+        do {
+            let r = try await Task.detached(priority: .userInitiated) {
+                try await pushCurrent(cwd)
+            }.value
+            gitNoteBySession[id] = GitNote(ok: true, text: "Pushed \(r.branch).")
+            loadChanges(id)
+        } catch {
+            gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
+        }
+    }
+
+    /// Open a PR for the session's branch (pushes first via gh), off the main actor.
+    /// Returns the result for the UI to show the URL, or nil on failure (note set).
+    func createPullRequest(_ id: String, title: String, body: String, draft: Bool) async -> PrCreateResult? {
+        guard let cwd = cwd(of: id) else { return nil }
+        do {
+            let r = try await Task.detached(priority: .userInitiated) {
+                try await createPr(cwd, title: title, body: body, draft: draft)
+            }.value
+            gitNoteBySession[id] = GitNote(
+                ok: true, text: r.created ? "Pull request created." : "A PR already exists for this branch.")
+            loadChanges(id)
+            if let cwd = liveSession(id)?.meta.cwd ?? appState.store.get(id)?.cwd { loadPrs(cwd) }
+            return r
+        } catch {
+            gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
+            return nil
+        }
+    }
+
+    /// Draft a commit message with Claude for the session's current diff, off the
+    /// main actor. Returns the message, or nil on failure (note set).
+    func generateCommitMessage(_ id: String) async -> String? {
+        guard let cwd = cwd(of: id) else { return nil }
+        let files = diffBySession[id]?.files ?? []
+        do {
+            return try await Task.detached(priority: .userInitiated) {
+                try await JuancodeServices.generateCommitMessage(cwd, files)
+            }.value
+        } catch {
+            gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
+            return nil
+        }
+    }
+
+    /// First useful line of any git/gh/commit error, for a clean status note.
+    private func gitErrorText(_ error: Error) -> String {
+        if let e = error as? GitError { return e.message }
+        if let e = error as? GhError { return e.message }
+        if let e = error as? CommitMessageError { return e.message }
+        return String(describing: error)
+    }
+
     func delete(_ id: String) {
         let meta = appState.store.get(id)
         appState.registry.get(id)?.kill()

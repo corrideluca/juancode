@@ -629,14 +629,25 @@ struct DetailView: View {
     }
 }
 
+/// The two views the session detail pane can show: the live terminal, or the
+/// working-tree changes panel (diff + inline comments + git actions).
+private enum SessionTab: String, CaseIterable { case terminal = "Terminal", changes = "Changes" }
+
 struct SessionContainer: View {
     @EnvironmentObject var model: AppModel
     let meta: SessionMeta
+    @State private var tab: SessionTab = .terminal
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text(meta.title).font(.headline).lineLimit(1)
+                Picker("", selection: $tab) {
+                    ForEach(SessionTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .labelsHidden()
                 Spacer()
                 if model.isLive(meta.id) {
                     acceptAllToggle
@@ -649,7 +660,10 @@ struct SessionContainer: View {
             }
             .padding(8)
             Divider()
-            terminal
+            switch tab {
+            case .terminal: terminal
+            case .changes: ChangesPanel(sessionId: meta.id)
+            }
         }
         .navigationTitle(meta.title)
     }
