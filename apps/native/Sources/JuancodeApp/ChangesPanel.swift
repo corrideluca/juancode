@@ -11,25 +11,34 @@ private struct EditorTarget: Identifiable {
     let pty: EphemeralPty
 }
 
-/// Native SwiftUI port of the web `ChangesPanel` (+ `GitActions`). Shows a session's
-/// working-tree-vs-HEAD diff (file cards with hunks), supports inline line-range
-/// comments staged in-memory and a "Submit review" that injects them into the agent,
-/// and runs commit / push / PR via AppModel — all in-process (no WS hop), mirroring
-/// FolderPrs / FolderIssues. AI review pass (juancode-7ha) and base-branch diff
-/// (juancode-49w) are deliberately out of scope.
+/// Native SwiftUI port of the web `ChangesPanel` (+ `GitActions`), re-laid-out as a
+/// VS Code-style "Source Control" view (juancode-dxg): a resizable SIDE panel with a
+/// directory FILE TREE of changed files on the left and the selected file's diff
+/// (hunks + inline comments) on the right. Inline line-range comments are staged
+/// in-memory with a "Submit review" that injects them into the agent, and commit /
+/// push / PR run via AppModel — all in-process (no WS hop), mirroring FolderPrs /
+/// FolderIssues. AI review pass (juancode-7ha) and base-branch diff (juancode-49w)
+/// are out of scope; this view is self-contained so the later Changes/Issues tab
+/// switcher (juancode-fmh) can host it as-is.
 struct ChangesPanel: View {
     @EnvironmentObject var model: AppModel
     let sessionId: String
 
     /// Free-text filter over changed-file paths.
     @State private var query = ""
-    /// Files whose hunks are collapsed (header shown, body hidden).
-    @State private var collapsed: Set<String> = []
+    /// Directory node ids currently expanded in the tree.
+    @State private var expanded: Set<String> = []
+    /// Whether the tree's expansion has been seeded for the current file set.
+    @State private var seededExpansion = false
+    /// The path of the file selected in the tree (its diff shows on the right).
+    @State private var selectedPath: String?
     /// Closing-note composer for "Submit review".
     @State private var showSubmit = false
     @State private var finalNote = ""
     /// The file currently open in the editor overlay, if any.
     @State private var editing: EditorTarget?
+    /// Persisted width of the tree pane in the split.
+    @AppStorage("changes.treeWidth") private var treeWidth: Double = 260
 
     private var diff: DiffResult? { model.diff(sessionId) }
     private var loading: Bool { model.diffLoading.contains(sessionId) }
@@ -45,12 +54,28 @@ struct ChangesPanel: View {
             }
         }
         .onAppear { if diff == nil { model.loadChanges(sessionId) } }
+        .onChange(of: diff) { _, _ in syncSelectionAndExpansion() }
         .sheet(item: $editing) { target in
             EditorOverlay(
                 file: target.file,
                 pty: target.pty,
                 onExit: { [id = target.id] in Task { @MainActor in closeEditor(id) } },
                 onForceClose: { target.pty.kill(); closeEditor(target.id) })
+        }
+    }
+
+    /// Keep the tree selection valid as the diff reloads, and expand all folders the
+    /// first time we have a file set so the tree opens fully (IDE behaviour).
+    private func syncSelectionAndExpansion() {
+        let files = diff?.files ?? []
+        if !seededExpansion, !files.isEmpty {
+            expanded = directoryNodeIDs(buildFileTree(files))
+            seededExpansion = true
+        }
+        if files.isEmpty {
+            selectedPath = nil
+        } else if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
+            selectedPath = files.first?.path
         }
     }
 
@@ -93,12 +118,6 @@ struct ChangesPanel: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 11))
                 .frame(width: 150)
-            Button(allCollapsed ? "Expand all" : "Collapse all") {
-                let files = diff?.files ?? []
-                collapsed = allCollapsed ? [] : Set(files.map(\.path))
-            }
-            .controlSize(.small)
-            .disabled((diff?.files ?? []).isEmpty)
             Button("Refresh") { model.loadChanges(sessionId) }
                 .controlSize(.small)
             GitActionsView(sessionId: sessionId)
@@ -107,18 +126,15 @@ struct ChangesPanel: View {
         .padding(.vertical, 6)
     }
 
-    private var allCollapsed: Bool {
-        let files = diff?.files ?? []
-        return !files.isEmpty && files.allSatisfy { collapsed.contains($0.path) }
-    }
-
-    // MARK: - Content (file cards)
+    // MARK: - Content (tree + diff split)
 
     private var visibleFiles: [DiffFile] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         let files = diff?.files ?? []
         return q.isEmpty ? files : files.filter { $0.path.lowercased().contains(q) }
     }
+
+    private var tree: [FileTreeNode] { buildFileTree(visibleFiles) }
 
     @ViewBuilder
     private var content: some View {
@@ -129,30 +145,70 @@ struct ChangesPanel: View {
         } else if (diff?.files ?? []).isEmpty {
             centered("No changes in the working tree.")
         } else {
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    if visibleFiles.isEmpty {
-                        Text("No files match “\(query)”.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    ForEach(visibleFiles, id: \.path) { file in
-                        FileCard(
-                            sessionId: sessionId,
-                            file: file,
-                            comments: model.comments(sessionId).filter { $0.file == file.path },
-                            collapsed: collapsed.contains(file.path),
-                            onToggleCollapse: { toggleCollapse(file.path) },
-                            onEdit: { openEditor(file.path) })
-                    }
-                }
-                .padding(10)
-            }
+            splitView
         }
     }
 
-    private func toggleCollapse(_ path: String) {
-        if collapsed.contains(path) { collapsed.remove(path) } else { collapsed.insert(path) }
+    /// The resizable tree | diff split. A draggable divider sets the tree pane width
+    /// (persisted via @AppStorage), clamped to a sensible range.
+    private var splitView: some View {
+        HStack(spacing: 0) {
+            treePane
+                .frame(width: CGFloat(treeWidth))
+            ResizeHandle(width: $treeWidth, min: 160, max: 520)
+            diffPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { syncSelectionAndExpansion() }
+    }
+
+    // MARK: - Tree pane
+
+    @ViewBuilder
+    private var treePane: some View {
+        if visibleFiles.isEmpty {
+            Text("No files match “\(query)”.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(8)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(tree) { node in
+                        FileTreeRows(
+                            node: node,
+                            depth: 0,
+                            selectedPath: $selectedPath,
+                            expanded: $expanded)
+                    }
+                }
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color(NSColor.textBackgroundColor).opacity(0.3))
+        }
+    }
+
+    // MARK: - Diff pane (selected file)
+
+    @ViewBuilder
+    private var diffPane: some View {
+        if let path = selectedPath, let file = visibleFiles.first(where: { $0.path == path }) {
+            ScrollView {
+                FileCard(
+                    sessionId: sessionId,
+                    file: file,
+                    comments: model.comments(sessionId).filter { $0.file == file.path },
+                    collapsed: false,
+                    onToggleCollapse: {},
+                    onEdit: { openEditor(file.path) },
+                    collapsible: false)
+                    .padding(10)
+            }
+        } else {
+            centered("Select a file to view its diff.")
+        }
     }
 
     private func centered(_ text: String) -> some View {
@@ -208,6 +264,9 @@ private struct FileCard: View {
     let collapsed: Bool
     let onToggleCollapse: () -> Void
     let onEdit: () -> Void
+    /// When false (the side-by-side diff pane), the collapse chevron is hidden — the
+    /// single selected file is always shown fully expanded.
+    var collapsible: Bool = true
 
     /// The (side, line) a new comment is being composed on, if any.
     @State private var composing: (side: CommentSide, line: Int)?
@@ -239,8 +298,10 @@ private struct FileCard: View {
         HStack(spacing: 8) {
             Button(action: onToggleCollapse) {
                 HStack(spacing: 6) {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                    if collapsible {
+                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
                     Text(file.status.rawValue)
                         .font(.system(size: 10, weight: .medium)).foregroundStyle(statusColor)
                     Text(file.oldPath != nil ? "\(file.oldPath!) → \(file.path)" : file.path)
@@ -248,6 +309,7 @@ private struct FileCard: View {
                 }
             }
             .buttonStyle(.plain)
+            .disabled(!collapsible)
             Spacer(minLength: 6)
             Text("+\(file.additions)").font(.system(size: 10)).foregroundStyle(.green)
             Text("−\(file.deletions)").font(.system(size: 10)).foregroundStyle(.red)
@@ -538,6 +600,125 @@ private struct GitActionsView: View {
             }
         }
         .padding(12).frame(width: 320)
+    }
+}
+
+// MARK: - File tree (rows + resize handle)
+
+/// Renders one tree node and (for a folder) its children recursively. A folder row
+/// toggles its expansion; a file row selects itself so its diff shows on the right.
+private struct FileTreeRows: View {
+    let node: FileTreeNode
+    let depth: Int
+    @Binding var selectedPath: String?
+    @Binding var expanded: Set<String>
+
+    var body: some View {
+        if node.isDirectory {
+            folderRow
+            if expanded.contains(node.id), let kids = node.children {
+                ForEach(kids) { child in
+                    FileTreeRows(node: child, depth: depth + 1,
+                                 selectedPath: $selectedPath, expanded: $expanded)
+                }
+            }
+        } else if let file = node.file {
+            fileRow(file)
+        }
+    }
+
+    private var folderRow: some View {
+        Button {
+            if expanded.contains(node.id) { expanded.remove(node.id) } else { expanded.insert(node.id) }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: expanded.contains(node.id) ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 8)).foregroundStyle(.secondary).frame(width: 10)
+                Image(systemName: "folder").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(node.name)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+            }
+            .padding(.leading, indent).padding(.trailing, 8).padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func fileRow(_ file: DiffFile) -> some View {
+        let selected = selectedPath == file.path
+        return Button {
+            selectedPath = file.path
+        } label: {
+            HStack(spacing: 5) {
+                // Align the file glyph with folder names (account for the chevron slot).
+                Text(statusGlyph(file.status))
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(statusColor(file.status))
+                    .frame(width: 18)
+                Text(node.name)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                if file.additions > 0 {
+                    Text("+\(file.additions)").font(.system(size: 9)).foregroundStyle(.green)
+                }
+                if file.deletions > 0 {
+                    Text("−\(file.deletions)").font(.system(size: 9)).foregroundStyle(.red)
+                }
+            }
+            .padding(.leading, indent).padding(.trailing, 8).padding(.vertical, 3)
+            .background(selected ? Color.accentColor.opacity(0.18) : .clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var indent: CGFloat { 8 + CGFloat(depth) * 14 }
+
+    private func statusGlyph(_ s: FileStatus) -> String {
+        switch s {
+        case .modified: return "M"
+        case .added, .untracked: return "A"
+        case .deleted: return "D"
+        case .renamed: return "R"
+        }
+    }
+
+    private func statusColor(_ s: FileStatus) -> Color {
+        switch s {
+        case .modified: return .orange
+        case .added, .untracked: return .green
+        case .deleted: return .red
+        case .renamed: return .blue
+        }
+    }
+}
+
+/// A thin draggable vertical divider that resizes the pane to its left by writing
+/// `width` (clamped to [min, max]). Shows a resize cursor on hover.
+private struct ResizeHandle: View {
+    @Binding var width: Double
+    let min: Double
+    let max: Double
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.18))
+            .frame(width: 1)
+            .overlay(
+                Rectangle().fill(Color.clear).frame(width: 8)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                width = Swift.min(max, Swift.max(min, width + value.translation.width))
+                            })
+            )
     }
 }
 
