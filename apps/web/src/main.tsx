@@ -5,10 +5,9 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
-  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { Sidebar } from "./components/Sidebar.tsx";
+import { AppShell } from "./components/AppShell.tsx";
 import { NewSession } from "./components/NewSession.tsx";
 import { SessionView } from "./components/SessionView.tsx";
 import "./styles.css";
@@ -16,14 +15,7 @@ import "./styles.css";
 const queryClient = new QueryClient();
 
 const rootRoute = createRootRoute({
-  component: () => (
-    <div className="flex h-full w-full">
-      <Sidebar />
-      <main className="min-w-0 flex-1">
-        <Outlet />
-      </main>
-    </div>
-  ),
+  component: AppShell,
 });
 
 const indexRoute = createRoute({

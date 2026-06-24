@@ -1,3 +1,4 @@
+import { getToken, promptForToken } from "./auth.ts";
 import type {
   BeadsResult,
   CommentSide,
@@ -62,19 +63,41 @@ export interface ProviderStatus {
   mcpServers: McpServerStatus[];
 }
 
+/**
+ * Build request headers, adding a Bearer token when one is stored. The httpOnly
+ * cookie usually carries auth for same-origin fetches; the Bearer header is a
+ * fallback for when cookies are blocked. No-op when auth is disabled (no token).
+ */
+function authHeaders(base?: Record<string, string>): Record<string, string> | undefined {
+  const token = getToken();
+  if (!token) return base;
+  return { ...(base ?? {}), Authorization: `Bearer ${token}` };
+}
+
+/** Surface a 401 to the user as a token prompt, then rethrow for the caller. */
+function check401(res: Response): void {
+  if (res.status === 401) promptForToken();
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok) {
+    check401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return (await res.json()) as T;
 }
 
 async function sendJson<T>(url: string, method: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    headers: authHeaders(body === undefined ? undefined : { "Content-Type": "application/json" }),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    check401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return (res.status === 204 ? undefined : await res.json()) as T;
 }
 
@@ -137,10 +160,13 @@ export const api = {
   uploadFile: async (file: File): Promise<{ path: string }> => {
     const res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, {
       method: "POST",
-      headers: { "Content-Type": file.type || "application/octet-stream" },
+      headers: authHeaders({ "Content-Type": file.type || "application/octet-stream" }),
       body: file,
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      check401(res);
+      throw new Error(`${res.status} ${res.statusText}`);
+    }
     return (await res.json()) as { path: string };
   },
 };

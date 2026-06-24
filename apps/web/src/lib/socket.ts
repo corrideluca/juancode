@@ -1,4 +1,5 @@
 import type { ClientMessage, ServerMessage } from "../protocol.ts";
+import { getToken, promptForToken } from "./auth.ts";
 
 type Listener = (msg: ServerMessage) => void;
 
@@ -9,9 +10,19 @@ class JuancodeSocket {
   private readonly queue: string[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Tracks connections that never opened, to distinguish an auth rejection
+  // (immediate close before open) from an ordinary dropped connection.
+  private opened = false;
+  private failedCloses = 0;
+
   private url(): string {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    return `${proto}://${location.host}/ws`;
+    // Browsers can't set headers on a WebSocket, so the token rides as a query
+    // param. The cookie also carries it once set; either suffices server-side.
+    // When auth is disabled there is no token and the URL is unchanged.
+    const token = getToken();
+    const q = token ? `?token=${encodeURIComponent(token)}` : "";
+    return `${proto}://${location.host}/ws${q}`;
   }
 
   private connect(): void {
@@ -20,8 +31,11 @@ class JuancodeSocket {
 
     const ws = new WebSocket(this.url());
     this.ws = ws;
+    this.opened = false;
 
     ws.onopen = () => {
+      this.opened = true;
+      this.failedCloses = 0;
       while (this.queue.length) ws.send(this.queue.shift()!);
     };
     ws.onmessage = (ev) => {
@@ -35,6 +49,16 @@ class JuancodeSocket {
     };
     ws.onclose = () => {
       this.ws = null;
+      // A close before the socket ever opened most likely means the upgrade was
+      // rejected (401 — wrong/missing token). After a couple of such failures,
+      // prompt for a token rather than reconnecting forever.
+      if (!this.opened) {
+        this.failedCloses += 1;
+        if (this.failedCloses >= 2) {
+          promptForToken();
+          return;
+        }
+      }
       if (!this.reconnectTimer) {
         this.reconnectTimer = setTimeout(() => {
           this.reconnectTimer = null;

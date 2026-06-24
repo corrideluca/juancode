@@ -38,7 +38,7 @@ function groupByFolder(sessions: SessionMeta[]): FolderGroup[] {
     .sort((a, b) => a.cwd.localeCompare(b.cwd));
 }
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const sessions = useQuery({
@@ -136,7 +136,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-neutral-800 bg-neutral-950">
+    <aside className="flex h-full w-[85vw] max-w-xs shrink-0 flex-col border-r border-neutral-800 bg-neutral-950 md:w-64">
       <div className="flex items-center justify-between px-4 py-3">
         <Link to="/" className="text-sm font-semibold tracking-tight">
           juancode
@@ -152,6 +152,7 @@ export function Sidebar() {
           </button>
           <Link
             to="/"
+            onClick={() => onNavigate?.()}
             className="rounded-md bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700"
           >
             + New
@@ -257,6 +258,7 @@ export function Sidebar() {
                   key={s.id}
                   to="/session/$id"
                   params={{ id: s.id }}
+                  onClick={() => onNavigate?.()}
                   className="group/item flex items-center gap-2 py-1.5 pr-2 pl-6 hover:bg-neutral-900 [&.active]:bg-neutral-900"
                 >
                   <ActivityDot status={s.status} activity={activity[s.id]} />

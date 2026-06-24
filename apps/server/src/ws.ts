@@ -1,6 +1,7 @@
 import type { Server } from "node:http";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
+import { verifyWsUpgrade } from "./auth.ts";
 import { sessionDb } from "./db.ts";
 import { editors } from "./editor.ts";
 import { terminals } from "./terminal.ts";
@@ -12,7 +13,19 @@ import type { Session } from "./session.ts";
 import type { ClientMessage, ServerMessage } from "./protocol.ts";
 
 export function setupWebSocket(server: Server): void {
-  const wss = new WebSocketServer({ server, path: "/ws" });
+  // `noServer` so we own the upgrade and can gate it on the auth token before
+  // the handshake completes (a 401 here is rejected before any pty is touched).
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on("upgrade", (req, socket, head) => {
+    const { pathname } = new URL(req.url ?? "", "http://localhost");
+    if (pathname !== "/ws") {
+      socket.destroy();
+      return;
+    }
+    if (!verifyWsUpgrade(req, socket)) return; // writes 401 + destroys on failure
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
 
   wss.on("connection", (ws) => {
     // sessionId -> cleanup functions for this connection's subscriptions.

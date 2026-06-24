@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import express from "express";
+import { authEnabled, authMiddleware } from "./auth.ts";
 import { DEFAULT_CWD, PORT } from "./config.ts";
 import { getBeads } from "./beads.ts";
 import { commentDb, reviewDb, sessionDb } from "./db.ts";
@@ -25,6 +26,11 @@ sessionDb.markOrphansExited();
 
 const app = express();
 app.use(express.json());
+
+// Opt-in token auth (gated on JUANCODE_TOKEN). No-op when the env var is unset,
+// so localhost `pnpm dev` is unchanged. When set, every request below — API and
+// the static SPA — requires the token via Bearer header, ?token=, or cookie.
+app.use(authMiddleware());
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -428,6 +434,11 @@ server.listen(PORT, () => {
   if (!existsSync(webDist)) {
     console.log("  (web not built — run the Vite dev server with `pnpm dev:web`)");
   }
+  console.log(
+    authEnabled()
+      ? "  auth: ENABLED (JUANCODE_TOKEN set) — token required on HTTP + WS"
+      : "  auth: disabled (set JUANCODE_TOKEN to require a token for remote access)",
+  );
 });
 
 let shuttingDown = false;
