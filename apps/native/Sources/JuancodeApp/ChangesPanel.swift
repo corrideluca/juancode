@@ -40,6 +40,12 @@ struct ChangesPanel: View {
     @State private var editing: EditorTarget?
     /// Persisted width of the tree pane in the split.
     @AppStorage("changes.treeWidth") private var treeWidth: Double = 260
+    /// Whether the left file-tree pane is shown (toggled from the header).
+    @AppStorage("changes.treeShown") private var treeShown: Bool = true
+
+    /// All directory node ids for the current file set — the full set when every
+    /// folder is expanded.
+    private var allDirIDs: Set<String> { directoryNodeIDs(buildFileTree(visibleFiles)) }
 
     private var diff: DiffResult? { model.diff(sessionId) }
     private var loading: Bool { model.diffLoading.contains(sessionId) }
@@ -106,6 +112,11 @@ struct ChangesPanel: View {
 
     private var header: some View {
         HStack(spacing: 10) {
+            Button { treeShown.toggle() } label: {
+                Image(systemName: treeShown ? "sidebar.left" : "sidebar.squares.left")
+            }
+            .buttonStyle(.borderless)
+            .help(treeShown ? "Hide the file tree" : "Show the file tree")
             if let files = diff?.files {
                 Text("\(files.count) file\(files.count == 1 ? "" : "s")")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -220,9 +231,11 @@ struct ChangesPanel: View {
     /// (persisted via @AppStorage), clamped to a sensible range.
     private var splitView: some View {
         HStack(spacing: 0) {
-            treePane
-                .frame(width: CGFloat(treeWidth))
-            ResizeHandle(width: $treeWidth, min: 160, max: 520)
+            if treeShown {
+                treePane
+                    .frame(width: CGFloat(treeWidth))
+                ResizeHandle(width: $treeWidth, min: 160, max: 520)
+            }
             diffPane
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -240,21 +253,45 @@ struct ChangesPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .padding(8)
         } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(tree) { node in
-                        FileTreeRows(
-                            node: node,
-                            depth: 0,
-                            selectedPath: $selectedPath,
-                            expanded: $expanded)
+            VStack(spacing: 0) {
+                treePaneHeader
+                Divider()
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(tree) { node in
+                            FileTreeRows(
+                                node: node,
+                                depth: 0,
+                                selectedPath: $selectedPath,
+                                expanded: $expanded)
+                        }
                     }
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Color(NSColor.textBackgroundColor).opacity(0.3))
         }
+    }
+
+    /// Collapse-all / expand-all controls for the tree's directories. Disabled when
+    /// there are no folders to act on (a flat file list).
+    private var treePaneHeader: some View {
+        let dirs = allDirIDs
+        return HStack(spacing: 4) {
+            Spacer()
+            Button { expanded = [] } label: { Image(systemName: "rectangle.compress.vertical") }
+                .buttonStyle(.borderless)
+                .help("Collapse all folders")
+                .disabled(dirs.isEmpty || expanded.isEmpty)
+            Button { expanded = dirs } label: { Image(systemName: "rectangle.expand.vertical") }
+                .buttonStyle(.borderless)
+                .help("Expand all folders")
+                .disabled(dirs.isEmpty || expanded == dirs)
+        }
+        .font(.system(size: 10))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
     }
 
     // MARK: - Diff pane (selected file)
