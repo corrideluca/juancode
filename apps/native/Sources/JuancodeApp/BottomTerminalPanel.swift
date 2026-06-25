@@ -23,7 +23,7 @@ struct BottomTerminalPanel: View {
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(Color.black)
     }
 
     private var tabStrip: some View {

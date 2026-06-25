@@ -120,8 +120,48 @@ browser/phone clients attach to the identical registry over `/ws`.
 | `NewSessionView` | provider + cwd + accept-all + worktree → `registry.create` |
 
 Core shell shipped: sidebar with live activity dots, SwiftTerm session view,
-new-session + reactivate + delete. The remaining `apps/web` panels
-(changes/beads/PR/search/status + editor modal) are tracked in `juancode-5za`.
+new-session + reactivate + delete.
+
+### Panels (`juancode-5za`, shipped)
+
+The `apps/web` panels are now ported to SwiftUI, keyed per work dir off `AppModel`
+(`beadsByCwd` / `prsByCwd`):
+
+| `Sources/JuancodeApp` | role |
+| --- | --- |
+| `ChangesPanel` | git diff with vim-like syntax highlighting + click-drag line-range inline comments + 'Review with Claude' |
+| `IssuesPanel` | interactive bd/beads issues per folder (grouped via `BeadsGrouping`); `workOnIssue` dispatches a session |
+| `BottomTerminalPanel` | per-workdir shell terminal, VS Code-style tabs + split |
+| `SearchPanel` / `StatusPanel` | FTS5 scrollback search; MCP/auth status |
+| `EditorOverlay` | in-app file editor modal (ephemeral pty) |
+| `RootView` | tabbed right-side panel switching Changes/Issues, docks the bottom terminal |
+
+## Oracle — global orchestrator (`juancode-wjg`)
+
+A persistent global helper docked bottom-right (`OracleDock`), independent of the
+focused session/workdir. Two surfaces in one floating panel:
+
+- **Issues** — a global bd tracker living in its own control dir
+  (`~/.juancode/oracle`, a git repo with a `.beads` tracker, prefix `oracle-`). It's
+  just another cwd, so the existing `getBeads(cwd)` reads it unchanged — no `--db`
+  plumbing. Each item offers **Dispatch…** (spawn an agent in a project) and **Ask
+  Oracle**.
+- **Chat** — a real pinned `claude` session (cwd = the control dir, so it gets
+  native bd access + reads `AGENTS.md`). Identified by its unique cwd and hidden
+  from the per-project sidebar; restored across launches.
+
+| `Sources/…` | role |
+| --- | --- |
+| `JuancodeServices/Oracle.swift` | control-dir bootstrap (`git init` + `bd init`), the `dispatch.jsonl` mailbox (append/tail with offset + partial-line safety), the `state.json` snapshot, and the agent's `AGENTS.md` instructions |
+| `JuancodeApp/OracleModel.swift` | owns the agent session, tails the mailbox to spawn project agents, keeps `state.json` fresh, exposes the global tracker |
+| `JuancodeApp/OracleDock.swift` | the bottom-right overlay: Issues view + dispatch picker + the agent chat terminal |
+
+**Dispatch bridge.** Rather than scraping a TUI pty stream, the Oracle agent (and
+the dock UI) append one `OracleDispatch` JSON line to `dispatch.jsonl`; the app
+tails it and turns each line into a real session via `AppModel.create` (reusing
+worktree isolation). Deterministic, observable, and faithful — the agent uses its
+normal file tools, no new network surface. Set `JUANCODE_ORACLE_DIR` to relocate
+the control dir (tests do).
 
 ## Run
 

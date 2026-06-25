@@ -1,0 +1,127 @@
+import XCTest
+import JuancodeCore
+@testable import JuancodeServices
+
+/// Covers the testable Oracle plumbing (juancode-wjg): the dispatch-mailbox
+/// append/tail protocol (offset semantics, partial + malformed lines), provider
+/// resolution, and the state-snapshot round-trip. The control dir is pointed at a
+/// fresh temp dir via `JUANCODE_ORACLE_DIR` so nothing touches `~/.juancode`.
+final class OracleTests: XCTestCase {
+    private var dir: String = ""
+
+    override func setUpWithError() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("juancode-oracle-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        dir = path
+        setenv("JUANCODE_ORACLE_DIR", path, 1)
+        // Start with an empty mailbox, as bootstrap would.
+        FileManager.default.createFile(atPath: OraclePaths.dispatchFile, contents: Data())
+    }
+
+    override func tearDownWithError() throws {
+        unsetenv("JUANCODE_ORACLE_DIR")
+        try? FileManager.default.removeItem(atPath: dir)
+    }
+
+    func testPathsRootAtControlDir() {
+        XCTAssertEqual(OraclePaths.controlDir, dir)
+        XCTAssertTrue(OraclePaths.dispatchFile.hasSuffix("dispatch.jsonl"))
+        XCTAssertTrue(OraclePaths.stateFile.hasSuffix("state.json"))
+        XCTAssertTrue(OraclePaths.beadsDir.hasSuffix(".beads"))
+    }
+
+    func testResolvedProviderDefaultsToClaude() {
+        XCTAssertEqual(OracleDispatch(project: "/p", prompt: "x").resolvedProvider, .claude)
+        XCTAssertEqual(OracleDispatch(project: "/p", prompt: "x", provider: "codex").resolvedProvider, .codex)
+        XCTAssertEqual(OracleDispatch(project: "/p", prompt: "x", provider: "CLAUDE").resolvedProvider, .claude)
+        // Unrecognized provider still dispatches (as Claude) rather than dropping.
+        XCTAssertEqual(OracleDispatch(project: "/p", prompt: "x", provider: "bogus").resolvedProvider, .claude)
+    }
+
+    func testAppendThenReadRoundTrips() throws {
+        try appendOracleDispatch(OracleDispatch(project: "/a", prompt: "do a"))
+        try appendOracleDispatch(OracleDispatch(project: "/b", prompt: "do b", provider: "codex", worktree: true))
+
+        let (out, offset) = readOracleDispatches(since: 0)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0], OracleDispatch(project: "/a", prompt: "do a"))
+        XCTAssertEqual(out[1].project, "/b")
+        XCTAssertEqual(out[1].worktree, true)
+        XCTAssertEqual(out[1].resolvedProvider, .codex)
+        // Offset advances past everything consumed.
+        let size = try Data(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile)).count
+        XCTAssertEqual(offset, size)
+    }
+
+    func testReadIsIncrementalFromOffset() throws {
+        try appendOracleDispatch(OracleDispatch(project: "/a", prompt: "first"))
+        let (first, off1) = readOracleDispatches(since: 0)
+        XCTAssertEqual(first.count, 1)
+
+        // Nothing new yet.
+        let (none, off2) = readOracleDispatches(since: off1)
+        XCTAssertTrue(none.isEmpty)
+        XCTAssertEqual(off2, off1)
+
+        try appendOracleDispatch(OracleDispatch(project: "/b", prompt: "second"))
+        let (second, _) = readOracleDispatches(since: off2)
+        XCTAssertEqual(second.map(\.project), ["/b"])
+    }
+
+    func testPartialTrailingLineIsNotConsumed() throws {
+        // A half-written append (no trailing newline) must be left for next time so
+        // we never misparse a torn line.
+        let url = URL(fileURLWithPath: OraclePaths.dispatchFile)
+        let contents = #"{"project":"/a","prompt":"complete"}"# + "\n"
+            + #"{"project":"/b","prompt":"partial"#
+        try Data(contents.utf8).write(to: url)
+
+        let (out, offset) = readOracleDispatches(since: 0)
+        XCTAssertEqual(out.map(\.project), ["/a"])
+        // Re-reading from the returned offset still yields nothing until the partial
+        // line is completed.
+        XCTAssertTrue(readOracleDispatches(since: offset).dispatches.isEmpty)
+    }
+
+    func testMalformedLineIsSkipped() throws {
+        let url = URL(fileURLWithPath: OraclePaths.dispatchFile)
+        let contents = "not json\n" + #"{"project":"/ok","prompt":"good"}"# + "\n"
+        try Data(contents.utf8).write(to: url)
+        let (out, _) = readOracleDispatches(since: 0)
+        XCTAssertEqual(out.map(\.project), ["/ok"])
+    }
+
+    func testFileShrinkResetsOffset() throws {
+        try appendOracleDispatch(OracleDispatch(project: "/a", prompt: "x"))
+        let big = 10_000
+        // An offset past EOF (file rotated/shrank) clamps to the current size
+        // instead of crashing on an out-of-range subdata.
+        let (out, offset) = readOracleDispatches(since: big)
+        XCTAssertTrue(out.isEmpty)
+        let size = try Data(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile)).count
+        XCTAssertEqual(offset, size)
+    }
+
+    func testStateRoundTrips() throws {
+        let state = OracleState(
+            updatedAt: 123,
+            workdirs: ["/proj"],
+            sessions: [OracleSessionSnapshot(
+                id: "s1", title: "T", cwd: "/proj", provider: "claude",
+                status: "running", activity: "idle", live: true)])
+        try writeOracleState(state)
+        let data = try Data(contentsOf: URL(fileURLWithPath: OraclePaths.stateFile))
+        let decoded = try JSONDecoder().decode(OracleState.self, from: data)
+        XCTAssertEqual(decoded, state)
+    }
+
+    func testAppendsArePathSafeWithSlashes() throws {
+        // withoutEscapingSlashes keeps the path readable in the JSONL (and the agent
+        // sees clean paths), while still decoding back exactly.
+        try appendOracleDispatch(OracleDispatch(project: "/abs/path/repo", prompt: "x"))
+        let raw = try String(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile), encoding: .utf8)
+        XCTAssertTrue(raw.contains("/abs/path/repo"))
+        XCTAssertFalse(raw.contains("\\/"))
+    }
+}

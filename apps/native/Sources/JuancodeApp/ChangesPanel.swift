@@ -17,9 +17,10 @@ private struct EditorTarget: Identifiable {
 /// (hunks + inline comments) on the right. Inline line-range comments are staged
 /// in-memory with a "Submit review" that injects them into the agent, and commit /
 /// push / PR run via AppModel — all in-process (no WS hop), mirroring FolderPrs /
-/// FolderIssues. AI review pass (juancode-7ha) and base-branch diff (juancode-49w)
-/// are out of scope; this view is self-contained so the later Changes/Issues tab
-/// switcher (juancode-fmh) can host it as-is.
+/// FolderIssues. An optional "Review with Claude" pass (juancode-7ha) runs the real
+/// `claude` CLI over the diff and overlays its findings inline. Base-branch diff
+/// (juancode-49w) is out of scope; this view is self-contained so the Changes/Issues
+/// tab switcher (juancode-fmh) can host it as-is.
 struct ChangesPanel: View {
     @EnvironmentObject var model: AppModel
     let sessionId: String
@@ -47,6 +48,7 @@ struct ChangesPanel: View {
         VStack(spacing: 0) {
             header
             Divider()
+            reviewBanner
             content
             if !model.comments(sessionId).isEmpty {
                 Divider()
@@ -118,12 +120,77 @@ struct ChangesPanel: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 11))
                 .frame(width: 150)
+            Button(model.isReviewing(sessionId) ? "Reviewing…" : "Review with Claude") {
+                model.runReview(sessionId)
+            }
+            .controlSize(.small)
+            .disabled(model.isReviewing(sessionId))
+            .help("Run Claude over this diff and overlay its findings")
             Button("Refresh") { model.loadChanges(sessionId) }
                 .controlSize(.small)
             GitActionsView(sessionId: sessionId)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    // MARK: - Review summary banner
+
+    /// Header banner mirroring the web `ReviewSummary`: a spinner while running, an
+    /// error line, or the model's summary + finding count once a result is cached.
+    @ViewBuilder
+    private var reviewBanner: some View {
+        if model.isReviewing(sessionId) {
+            reviewBannerBox(tint: ReviewSeverityStyle.accent) {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Claude is reviewing the diff…")
+                        .font(.system(size: 11)).foregroundStyle(ReviewSeverityStyle.accent)
+                }
+            }
+        } else if let r = model.review(sessionId) {
+            switch r.status {
+            case .error:
+                reviewBannerBox(tint: .red) {
+                    Text("Review failed: \(r.error ?? "unknown error")")
+                        .font(.system(size: 11)).foregroundStyle(.red)
+                }
+            case .empty:
+                reviewBannerBox(tint: ReviewSeverityStyle.accent) {
+                    Text("No changes to review.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            case .ok:
+                reviewBannerBox(tint: ReviewSeverityStyle.accent) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("✨ Claude review")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(ReviewSeverityStyle.accent)
+                            Text("\(r.findings.count) finding\(r.findings.count == 1 ? "" : "s") · \(reviewTimestamp(r.createdAt))")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        if let summary = r.summary {
+                            Text(summary)
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func reviewBannerBox<Content: View>(tint: Color, @ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(tint.opacity(0.08))
+    }
+
+    private func reviewTimestamp(_ msEpoch: Int) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(msEpoch) / 1000)
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 
     // MARK: - Content (tree + diff split)
@@ -200,6 +267,8 @@ struct ChangesPanel: View {
                     sessionId: sessionId,
                     file: file,
                     comments: model.comments(sessionId).filter { $0.file == file.path },
+                    findings: ReviewPresentation.findings(
+                        for: file.path, in: model.review(sessionId)?.findings ?? []),
                     collapsed: false,
                     onToggleCollapse: {},
                     onEdit: { openEditor(file.path) },
@@ -261,6 +330,9 @@ private struct FileCard: View {
     let sessionId: String
     let file: DiffFile
     let comments: [DiffComment]
+    /// AI review findings for THIS file (already filtered by path), overlaid on
+    /// their anchored line/side rows; unanchorable ones show in a strip up top.
+    var findings: [ReviewFinding] = []
     let collapsed: Bool
     let onToggleCollapse: () -> Void
     let onEdit: () -> Void
@@ -300,10 +372,36 @@ private struct FileCard: View {
     /// gesture and its highlight both index into this list.
     private var flatLines: [DiffLine] { hunks.flatMap(\.lines) }
 
+    /// The (side, line) pairs present in this file's diff, so we can tell which
+    /// findings anchor to a real row and which fall to the orphan strip.
+    private var anchoredPairs: Set<String> {
+        Set(flatLines.compactMap { $0.anchor.map { "\($0.side.rawValue):\($0.line)" } })
+    }
+
+    /// Findings that can't be anchored onto a row in the current diff (file-level,
+    /// or a line no longer present) — rendered in a strip under the header, mirroring
+    /// the web `orphanFindings`.
+    private var orphanFindings: [ReviewFinding] {
+        findings.filter { f in
+            guard let line = f.line else { return true }
+            return !anchoredPairs.contains("\(f.side.rawValue):\(line)")
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             cardHeader
             if !collapsed {
+                if !orphanFindings.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(orphanFindings.enumerated()), id: \.offset) { _, f in
+                            FindingRow(finding: f)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background(ReviewSeverityStyle.accent.opacity(0.05))
+                }
                 if file.binary {
                     note("Binary file — diff not shown.")
                 } else if file.truncated {
@@ -373,6 +471,12 @@ private struct FileCard: View {
                     // robust to the comments/composer interspersed below.
                     .background(rowFrameReporter(index: idx))
                 if let a = line.anchor {
+                    // AI review findings anchored to this exact line/side — shown above
+                    // the human comments, visually distinct (severity color + title).
+                    ForEach(Array(findings.filter { $0.side == a.side && $0.line == a.line }.enumerated()),
+                            id: \.offset) { _, f in
+                        FindingRow(finding: f)
+                    }
                     // Existing comments whose range ENDS on this line (so a range comment
                     // shows once, under its last line — matching how it anchors).
                     ForEach(comments.filter { $0.side == a.side && $0.endLine == a.line }, id: \.id) { c in
@@ -614,6 +718,65 @@ private struct CommentRow: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(Color.accentColor.opacity(0.08))
+    }
+}
+
+/// One AI review finding row (juancode-7ha) — used both inline (anchored to a diff
+/// line) and in a file's orphan strip. Visually distinct from a human `CommentRow`:
+/// a severity badge tinted by `ReviewSeverityStyle`, the title, the note, and a
+/// "✨ Claude" tag. Mirrors the web `FindingItem`.
+private struct FindingRow: View {
+    let finding: ReviewFinding
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(finding.severity.rawValue.uppercased())
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(ReviewSeverityStyle.color(finding.severity))
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .overlay(RoundedRectangle(cornerRadius: 3)
+                    .stroke(ReviewSeverityStyle.color(finding.severity).opacity(0.6)))
+            VStack(alignment: .leading, spacing: 1) {
+                if !finding.title.isEmpty {
+                    Text(finding.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                if !finding.note.isEmpty {
+                    Text(finding.note)
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+            }
+            Text("✨ Claude")
+                .font(.system(size: 9)).foregroundStyle(ReviewSeverityStyle.accent)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(ReviewSeverityStyle.accent.opacity(0.06))
+        .overlay(RoundedRectangle(cornerRadius: 4)
+            .stroke(ReviewSeverityStyle.accent.opacity(0.25)))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+/// Severity → color (+ the violet "Claude" accent) for the review overlay. Colors
+/// live in the view layer, mirroring `VimSyntaxPalette`; the pure ordering lives in
+/// `ReviewSeverity.rank` (JuancodeCore). Tuned to read well on the black app chrome
+/// (no gray system backgrounds), paralleling the web `SEVERITY_STYLE`.
+enum ReviewSeverityStyle {
+    /// The "✨ Claude" accent — a violet matching the web review violets.
+    static let accent = Color(red: 0.70, green: 0.55, blue: 0.95)
+
+    static func color(_ severity: ReviewSeverity) -> Color {
+        switch severity {
+        case .critical: return Color(red: 0.95, green: 0.42, blue: 0.42)  // red
+        case .high: return Color(red: 0.96, green: 0.58, blue: 0.30)      // orange
+        case .medium: return Color(red: 0.92, green: 0.78, blue: 0.36)    // amber
+        case .low: return Color(red: 0.45, green: 0.72, blue: 0.95)       // sky
+        case .info: return .secondary
+        }
     }
 }
 

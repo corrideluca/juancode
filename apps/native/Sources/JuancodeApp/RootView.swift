@@ -14,6 +14,11 @@ struct RootView: View {
         } detail: {
             DetailView()
         }
+        .preferredColorScheme(.dark)
+        .background(WindowBackground(color: .black))
+        // The global Oracle helper floats over the whole window, bottom-right,
+        // regardless of which session/workdir is focused (juancode-wjg).
+        .overlay(alignment: .bottomTrailing) { OracleDock() }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()
         }
@@ -25,6 +30,29 @@ struct RootView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+    }
+}
+
+/// Sets the host `NSWindow`'s background to a solid color (and makes the title bar
+/// transparent) so the whole window matches the black SwiftTerm views rather than
+/// the default system-gray window background. Used as a hidden `.background(...)`.
+private struct WindowBackground: NSViewRepresentable {
+    let color: NSColor
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { [weak v] in apply(to: v?.window) }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { [weak nsView] in apply(to: nsView?.window) }
+    }
+
+    private func apply(to window: NSWindow?) {
+        guard let window else { return }
+        window.backgroundColor = color
+        window.titlebarAppearsTransparent = true
     }
 }
 
@@ -56,12 +84,21 @@ struct SidebarView: View {
     /// How many archived sessions exist (for the toggle label / visibility).
     private var archivedCount: Int { model.sessions.filter(\.archived).count }
 
+    /// Aggregate token/cost usage across visible non-archived sessions, for the
+    /// sidebar footer total. Nil when nothing has usage yet.
+    private var totalUsage: SessionUsage? {
+        model.sessions.filter { !$0.archived }.aggregateUsage()
+    }
+
     /// Sessions filtered by `query` (case-insensitive over title + cwd) and the
     /// archived toggle, then grouped by folder and sorted stably by cwd — mirrors
     /// the web sidebar.
     private var groups: [FolderGroup] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let visible = showArchived ? model.sessions : model.sessions.filter { !$0.archived }
+        // Hide the pinned Oracle agent session — it's reachable from the Oracle dock,
+        // not the per-project sidebar (juancode-wjg).
+        let nonOracle = model.sessions.filter { $0.cwd != OraclePaths.controlDir }
+        let visible = showArchived ? nonOracle : nonOracle.filter { !$0.archived }
         let filtered = q.isEmpty
             ? visible
             : visible.filter {
@@ -113,6 +150,21 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            if let total = totalUsage, let label = total.badgeLabel {
+                Divider()
+                HStack(spacing: 4) {
+                    Text("Total").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(label)
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .help("Total token usage across visible sessions"
+                    + (total.costUsd != nil ? " · estimated cost" : ""))
+            }
             if archivedCount > 0 {
                 Divider()
                 Toggle(isOn: $showArchived) {
@@ -123,6 +175,7 @@ struct SidebarView: View {
                 .padding(.vertical, 4)
             }
         }
+        .background(Color.black)
         .toolbar {
             ToolbarItem {
                 Button { showingSearch = true } label: { Image(systemName: "magnifyingglass") }
@@ -602,6 +655,13 @@ struct SessionRow: View {
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            if let label = meta.usage?.badgeLabel {
+                Text(label)
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
+            }
             if meta.skipPermissions {
                 Image(systemName: "bolt.shield.fill")
                     .font(.system(size: 10))
@@ -613,11 +673,7 @@ struct SessionRow: View {
     }
 
     private var subtitle: String {
-        let folder = (meta.cwd as NSString).lastPathComponent
-        if let u = meta.usage, u.totalTokens > 0 {
-            return "\(folder) · \(u.totalTokens) tok"
-        }
-        return folder
+        (meta.cwd as NSString).lastPathComponent
     }
 
     private var dotColor: Color {
@@ -724,11 +780,30 @@ struct SessionContainer: View {
         nonmutating set { tabRaw = newValue.rawValue }
     }
 
+    /// Show the queue composer only while the session is live and mid-turn (busy or
+    /// waiting) — when idle the user just types into the terminal — or whenever a
+    /// draft is already buffered (so the "Queued" pill stays visible until it sends).
+    /// Mirrors the web SessionView render condition.
+    private var showMessageQueue: Bool {
+        guard model.isLive(meta.id) else { return false }
+        if model.queuedDraft(meta.id) != nil { return true }
+        switch model.activity(meta.id) {
+        case .busy, .waitingInput: return true
+        default: return false
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text(meta.title).font(.headline).lineLimit(1)
                 Spacer()
+                if let label = meta.usage?.badgeLabel {
+                    Text(label)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
+                }
                 if model.isLive(meta.id) {
                     acceptAllToggle
                     Label("live", systemImage: "dot.radiowaves.left.and.right")
@@ -760,6 +835,10 @@ struct SessionContainer: View {
                 VStack(spacing: 0) {
                     terminal
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showMessageQueue {
+                        Divider()
+                        MessageQueueComposer(sessionId: meta.id)
+                    }
                     if bottomShown {
                         BottomResizeHandle(height: $bottomHeight, min: 120, max: 720)
                         BottomTerminalPanel(cwd: meta.cwd)
@@ -797,7 +876,7 @@ struct SessionContainer: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(Color.black)
     }
 
     /// Per-session accept-all switch. Flipping it resume-restarts the CLI at the
@@ -827,6 +906,68 @@ struct SessionContainer: View {
                 .id(ObjectIdentifier(session))
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))
+        }
+    }
+}
+
+/// A small composer for queueing a follow-up instruction while the agent is still
+/// mid-turn (busy or waiting). The draft is buffered in `AppModel.queuedDrafts`
+/// (keyed by session id) and auto-sent on the next idle edge by the activity
+/// subscription — so the user can line up their next message without watching for
+/// the turn to finish. Mirrors the web `MessageQueue`: shows a "Queued" pill with a
+/// Cancel button when something is buffered, otherwise a TextField + Queue button.
+private struct MessageQueueComposer: View {
+    @EnvironmentObject var model: AppModel
+    let sessionId: String
+    @State private var draft = ""
+
+    private func submit() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        model.queueDraft(sessionId, text)
+        draft = ""
+    }
+
+    var body: some View {
+        if let queued = model.queuedDraft(sessionId) {
+            HStack(spacing: 8) {
+                Text("Queued")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Color.blue.opacity(0.2))
+                    .foregroundStyle(.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                Text(queued)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .help(queued)
+                Spacer(minLength: 4)
+                Text("sends when the agent is idle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button {
+                    model.cancelQueuedDraft(sessionId)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                .help("Cancel queued message")
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+        } else {
+            HStack(spacing: 8) {
+                TextField("Queue a follow-up to send when the agent is done…", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .onSubmit { submit() }
+                Button("Queue") { submit() }
+                    .controlSize(.small)
+                    .font(.system(size: 12))
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("Buffer this message; it sends automatically when the agent goes idle")
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
         }
     }
 }

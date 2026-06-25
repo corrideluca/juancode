@@ -1,0 +1,259 @@
+import Foundation
+import JuancodeCore
+
+/// The "Oracle" global orchestrator (juancode-wjg). Oracle operates at a GLOBAL
+/// level — across every session and work dir — unlike the per-project panels. It
+/// is a real pinned `claude`/`codex` session whose cwd is a dedicated control
+/// directory, so it gets native bd access (its own tracker) plus a place for its
+/// instructions and the dispatch mailbox.
+///
+/// On-disk layout under `~/.juancode/oracle`:
+///   `.beads/`        — a dedicated bd tracker (prefix `oracle-`) for global items
+///   `AGENTS.md`      — instructions the Oracle CLI agent reads on launch
+///   `state.json`     — a live snapshot of active sessions + work dirs (app-written)
+///   `dispatch.jsonl` — the mailbox the agent appends to, to spawn project agents
+///
+/// The control dir is just another cwd, so the existing `getBeads(cwd)` reads the
+/// global tracker unchanged — no `--db` plumbing or bd-version coupling needed.
+
+public enum OraclePaths {
+    /// `~/.juancode/oracle`, overridable via `JUANCODE_ORACLE_DIR` (used by tests).
+    public static var controlDir: String {
+        if let o = ProcessInfo.processInfo.environment["JUANCODE_ORACLE_DIR"], !o.isEmpty { return o }
+        return (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/oracle")
+    }
+    public static var beadsDir: String { join(controlDir, ".beads") }
+    public static var gitDir: String { join(controlDir, ".git") }
+    public static var agentsFile: String { join(controlDir, "AGENTS.md") }
+    public static var stateFile: String { join(controlDir, "state.json") }
+    public static var dispatchFile: String { join(controlDir, "dispatch.jsonl") }
+
+    private static func join(_ base: String, _ component: String) -> String {
+        (base as NSString).appendingPathComponent(component)
+    }
+}
+
+/// A request the Oracle agent appends (one JSON object per line) to
+/// `dispatch.jsonl` to spawn — or seed an existing — agent in a project. The app
+/// tails the file and turns each new line into a real session.
+public struct OracleDispatch: Codable, Sendable, Equatable {
+    /// Absolute path of the target project / work dir the agent should run in.
+    public var project: String
+    /// The seed instruction sent to the agent once its TUI is up.
+    public var prompt: String
+    /// `"claude"` (default) or `"codex"`.
+    public var provider: String?
+    /// Isolate the dispatched agent in a fresh git worktree off `project`.
+    public var worktree: Bool?
+
+    public init(project: String, prompt: String, provider: String? = nil, worktree: Bool? = nil) {
+        self.project = project
+        self.prompt = prompt
+        self.provider = provider
+        self.worktree = worktree
+    }
+
+    /// Resolve `provider` to a `ProviderId`, defaulting to Claude for an absent or
+    /// unrecognized value (the dispatch should still go through).
+    public var resolvedProvider: ProviderId {
+        provider.flatMap { ProviderId(rawValue: $0.lowercased()) } ?? .claude
+    }
+}
+
+/// One live (or recently-exited) session, as written into `state.json` for the
+/// Oracle agent to read with its own tools.
+public struct OracleSessionSnapshot: Codable, Sendable, Equatable {
+    public var id: String
+    public var title: String
+    public var cwd: String
+    public var provider: String
+    public var status: String
+    public var activity: String?
+    public var live: Bool
+
+    public init(id: String, title: String, cwd: String, provider: String,
+                status: String, activity: String?, live: Bool) {
+        self.id = id
+        self.title = title
+        self.cwd = cwd
+        self.provider = provider
+        self.status = status
+        self.activity = activity
+        self.live = live
+    }
+}
+
+/// The global snapshot the app keeps fresh in `state.json` so the Oracle agent can
+/// see what's running and where, to drive cross-session/cross-project work.
+public struct OracleState: Codable, Sendable, Equatable {
+    /// ms since epoch (matches the rest of the app's timestamp unit).
+    public var updatedAt: Int
+    /// Distinct work dirs in play (project sessions), excluding the control dir.
+    public var workdirs: [String]
+    public var sessions: [OracleSessionSnapshot]
+
+    public init(updatedAt: Int, workdirs: [String], sessions: [OracleSessionSnapshot]) {
+        self.updatedAt = updatedAt
+        self.workdirs = workdirs
+        self.sessions = sessions
+    }
+}
+
+/// Errors raised while bootstrapping the control dir. UI degrades on these.
+public struct OracleError: Error, Sendable {
+    public let message: String
+    public init(_ message: String) { self.message = message }
+}
+
+private func bdBin() -> String {
+    resolveBin("bd", override: ProcessInfo.processInfo.environment["JUANCODE_BD_BIN"])
+}
+
+/// Ensure the control directory exists and is a self-contained bd tracker with a
+/// dispatch mailbox and fresh instructions. Idempotent: safe to call on every
+/// launch. Runs the slow/side-effecting bits (git init, bd init) only when their
+/// markers are absent.
+///
+/// `bd init` needs a git repo to persist its prefix/config, so we `git init`
+/// first — exactly how a project's `.beads` tracker is created.
+public func ensureOracleControlDir() async throws {
+    let fm = FileManager.default
+    let dir = OraclePaths.controlDir
+    do {
+        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    } catch {
+        throw OracleError("Couldn't create Oracle control dir: \(error.localizedDescription)")
+    }
+
+    // git init — bd persists its config in the repo; without it `bd create` fails.
+    if !fm.fileExists(atPath: OraclePaths.gitDir) {
+        _ = try? await ProcessRunner.capture("git", ["init"], cwd: dir, timeout: 20, maxBytes: 1 << 20)
+    }
+
+    // bd init — only when there's no tracker yet (it's a one-time setup).
+    if !fm.fileExists(atPath: OraclePaths.beadsDir) {
+        _ = try? await ProcessRunner.capture(
+            bdBin(), ["init", "--prefix", "oracle"], cwd: dir, timeout: 30, maxBytes: 1 << 20)
+    }
+
+    // Dispatch mailbox — an empty append-only log of OracleDispatch lines.
+    if !fm.fileExists(atPath: OraclePaths.dispatchFile) {
+        fm.createFile(atPath: OraclePaths.dispatchFile, contents: Data())
+    }
+
+    // Instructions — rewritten every launch so the dispatch protocol stays current
+    // even if it evolves across app versions.
+    try? Data(oracleAgentsMarkdown.utf8).write(to: URL(fileURLWithPath: OraclePaths.agentsFile))
+}
+
+/// Append a dispatch request as one JSON line to the mailbox. Used by the app's
+/// own UI-initiated dispatch so it flows through the exact same path the agent
+/// uses (single source of truth for "spawn an agent in a project").
+public func appendOracleDispatch(_ dispatch: OracleDispatch) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    var line = try encoder.encode(dispatch)
+    line.append(0x0A) // newline
+    let url = URL(fileURLWithPath: OraclePaths.dispatchFile)
+    if let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: line)
+    } else {
+        try line.write(to: url)
+    }
+}
+
+/// Decode any complete dispatch lines starting at byte `offset`, returning the
+/// parsed requests and the new offset to resume from. A trailing partial line (no
+/// newline yet) is left unconsumed so a half-written append isn't misparsed.
+/// Malformed lines are skipped (never throw) so one bad line can't wedge the tail.
+public func readOracleDispatches(since offset: Int) -> (dispatches: [OracleDispatch], offset: Int) {
+    let url = URL(fileURLWithPath: OraclePaths.dispatchFile)
+    guard let data = try? Data(contentsOf: url) else { return ([], offset) }
+    guard offset <= data.count else { return ([], data.count) } // file shrank/rotated
+    let fresh = data.subdata(in: offset..<data.count)
+    guard let lastNewline = fresh.lastIndex(of: 0x0A) else { return ([], offset) }
+    let consumable = fresh.subdata(in: 0..<(lastNewline + 1))
+    let decoder = JSONDecoder()
+    var out: [OracleDispatch] = []
+    for lineData in consumable.split(separator: 0x0A) where !lineData.isEmpty {
+        if let d = try? decoder.decode(OracleDispatch.self, from: Data(lineData)) { out.append(d) }
+    }
+    return (out, offset + consumable.count)
+}
+
+/// Persist the global state snapshot to `state.json` (pretty, stable key order) so
+/// the Oracle agent can read it. Best-effort — failures are swallowed by callers.
+public func writeOracleState(_ state: OracleState) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    let data = try encoder.encode(state)
+    try data.write(to: URL(fileURLWithPath: OraclePaths.stateFile))
+}
+
+/// The seed prompt sent to the Oracle agent once its TUI is up (juancode-wjg). It
+/// points the agent at its instructions, tracker, and the dispatch mailbox.
+public let oracleSeedPrompt = """
+You are Oracle, the global orchestrator for this machine. Read ./AGENTS.md for \
+your role and the dispatch protocol, run `bd ready` to see the current global \
+work items, and read ./state.json to see what agents are already running. Then \
+tell me, briefly, what's on the board and what you'd suggest tackling first.
+"""
+
+/// Instructions written to the control dir's `AGENTS.md`, read by the Oracle CLI
+/// agent on launch. Kept here (not a bundled resource) so it ships with the binary
+/// and stays in lockstep with the dispatch protocol the app implements.
+public let oracleAgentsMarkdown = """
+# Oracle — global orchestrator
+
+You are **Oracle**, a persistent agent operating at a GLOBAL level across every
+juancode session and work dir. You are not scoped to one project. Your job is to
+track cross-cutting work and dispatch agents into the projects where the work
+actually happens.
+
+## Your global tracker
+
+This directory has its own `bd` (beads) tracker (prefix `oracle-`). Use it as a
+GLOBAL notes/issue tracker — a single item may span one or more projects.
+
+- `bd ready` / `bd list --json` — see global items.
+- `bd create "Title" --description="…" -t task -p 1` — capture a new global item.
+- A global item should link the per-project issues it spans by quoting their ids
+  in its description (e.g. "covers juancode-eba, web-77"). The per-project
+  trackers live in each repo's own `.beads/` and are owned by that project — read
+  them by dispatching an agent there; don't edit them from here.
+
+## Seeing what's running
+
+`state.json` (refreshed by the app) lists active sessions and their work dirs:
+
+```json
+{ "updatedAt": 0, "workdirs": ["/abs/project"],
+  "sessions": [{ "id": "…", "title": "…", "cwd": "/abs/project",
+                 "provider": "claude", "status": "running", "activity": "idle",
+                 "live": true }] }
+```
+
+## Dispatching agents into projects
+
+To spin up (or seed) an agent in a project, append ONE JSON object per line to
+`dispatch.jsonl`. The app tails this file and turns each new line into a real
+juancode session in that project:
+
+```jsonl
+{"project":"/abs/path/to/repo","prompt":"Work on oracle-12: …","provider":"claude","worktree":false}
+```
+
+Fields: `project` (absolute path, required), `prompt` (required), `provider`
+(`"claude"` or `"codex"`, default claude), `worktree` (default false — set true
+to isolate the agent in a fresh git worktree off the project so parallel agents
+don't collide). Append with your file tools, e.g.:
+
+```sh
+echo '{"project":"/abs/repo","prompt":"…"}' >> dispatch.jsonl
+```
+
+One line per dispatch. After appending, tell the user what you dispatched and
+where so they can watch it in the session list.
+"""

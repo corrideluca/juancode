@@ -34,6 +34,11 @@ Open http://localhost:5280, pick a provider and a working directory, and start a
   session, inheriting your environment so MCP config loads natively. Session metadata and
   scrollback are persisted to `data/juancode.db`.
 - `apps/web` — Vite + React + TanStack Router/Query + Tailwind + xterm.js.
+- `apps/native` — a native macOS port (Swift / SwiftUI, epic `juancode-u34`) where **the
+  app is the server**: an in-process registry owns the real ptys (`forkpty`, env
+  untouched) and fans output out to both the local SwiftUI view and remote browser/phone
+  clients over an embedded WebSocket server, so `apps/web` works against it unchanged. See
+  [apps/native/README.md](./apps/native/README.md).
 
 ## Configuration
 

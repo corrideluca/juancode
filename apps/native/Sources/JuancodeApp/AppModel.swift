@@ -48,6 +48,29 @@ final class AppModel: ObservableObject {
 
     func activity(_ id: String) -> SessionActivity? { activities[id] }
 
+    // MARK: - Queued follow-up messages (juancode-9o8)
+
+    /// One buffered follow-up instruction per session, keyed by session id. While a
+    /// session is busy/waiting the user can line up their next message here; it's
+    /// auto-sent (written to the pty with a trailing Enter) on the next busy/waiting
+    /// → idle edge for that session, then cleared. Keyed by id so switching sessions
+    /// preserves each session's pending draft. Mirrors the web SessionView's
+    /// client-side `queued` buffer + idle-edge detection.
+    @Published var queuedDrafts: [String: String] = [:]
+
+    /// The pending follow-up for `id`, if any.
+    func queuedDraft(_ id: String) -> String? { queuedDrafts[id] }
+
+    /// Buffer (or replace) a follow-up to auto-send on the next idle edge. Trims the
+    /// input; an empty message clears the buffer instead.
+    func queueDraft(_ id: String, _ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { queuedDrafts[id] = nil } else { queuedDrafts[id] = trimmed }
+    }
+
+    /// Drop the queued follow-up for `id` before it sends.
+    func cancelQueuedDraft(_ id: String) { queuedDrafts[id] = nil }
+
     func isLive(_ id: String) -> Bool { appState.registry.get(id) != nil }
 
     func liveSession(_ id: String) -> Session? { appState.registry.get(id) }
@@ -60,14 +83,42 @@ final class AppModel: ObservableObject {
         activities[s.id] = s.activity
         activityCancels[s.id]?()
         activityCancels[s.id] = s.onActivity { [weak self] st, _ in
-            Task { @MainActor in self?.activities[s.id] = st }
+            Task { @MainActor in
+                guard let self else { return }
+                let was = self.activities[s.id]
+                self.activities[s.id] = st
+                // Auto-send any queued follow-up on a real busy/waiting → idle edge
+                // (not the first observation), while the session is alive. Mirrors the
+                // web SessionView idle-edge detection. Lives here (not in the view) so
+                // it fires even when the SessionContainer for `s` isn't on screen.
+                if st == .idle, let was, was != .idle,
+                   let text = self.queuedDrafts[s.id], self.isLive(s.id) {
+                    s.write("\(text)\r")
+                    self.queuedDrafts[s.id] = nil
+                }
+            }
         }
         s.onExit { [weak self] _ in Task { @MainActor in self?.refresh() } }
     }
 
+    /// The most recently-created live session rooted in `cwd`, if any. Used to find
+    /// the pinned Oracle agent session by its unique control-dir cwd.
+    func liveSession(inCwd cwd: String) -> Session? {
+        appState.registry.all()
+            .filter { $0.meta.cwd == cwd }
+            .max { $0.meta.createdAt < $1.meta.createdAt }
+    }
+
+    /// The most recently-created persisted (incl. exited) session rooted in `cwd`.
+    func mostRecentPersisted(cwd: String) -> SessionMeta? {
+        appState.store.list()
+            .filter { $0.cwd == cwd }
+            .max { $0.createdAt < $1.createdAt }
+    }
+
     @discardableResult
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
-                isolateWorktree: Bool, initialInput: String? = nil) async -> Session? {
+                isolateWorktree: Bool, initialInput: String? = nil, select: Bool = true) async -> Session? {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
@@ -90,7 +141,7 @@ final class AppModel: ObservableObject {
             // mechanism the WS `.create` path uses (Session.autoSubmit).
             if let initialInput, !initialInput.isEmpty { s.autoSubmit(initialInput) }
             refresh()
-            selection = s.id
+            if select { selection = s.id }
             return s
         } catch {
             errorMessage = "Failed to start \(provider.rawValue): \(error)"
@@ -416,11 +467,21 @@ final class AppModel: ObservableObject {
 
     private var diffInFlight: Set<String> = []
 
+    /// Per-session 'Review with Claude' result (juancode-7ha). The last AI review
+    /// pass over the working-tree diff, cached so findings stay overlaid until the
+    /// next run — the native analogue of the web's `useQuery(["review", …])`.
+    @Published var reviewBySession: [String: ReviewResult] = [:]
+    /// Sessions whose review pass is currently running, so the panel can show a
+    /// "Reviewing…" spinner and disable the button.
+    @Published var reviewRunning: Set<String> = []
+
     struct GitNote: Equatable { var ok: Bool; var text: String }
 
     func diff(_ id: String) -> DiffResult? { diffBySession[id] }
     func gitState(_ id: String) -> GitState? { gitStateBySession[id] }
     func comments(_ id: String) -> [DiffComment] { commentsBySession[id] ?? [] }
+    func review(_ id: String) -> ReviewResult? { reviewBySession[id] }
+    func isReviewing(_ id: String) -> Bool { reviewRunning.contains(id) }
 
     /// The cwd a session's changes panel operates on (its own working directory).
     private func cwd(of id: String) -> String? {
@@ -571,6 +632,27 @@ final class AppModel: ObservableObject {
         commentsBySession[id] = []
     }
 
+    /// Run an AI review pass over the session's working-tree diff (juancode-7ha):
+    /// feed the diff (+ any staged inline comments as steering context) to the real
+    /// `claude` CLI via the existing `BinaryResolver` — same auth/binary as a
+    /// session, no shadow HOME — and cache the structured findings to overlay on the
+    /// diff. Coalesces concurrent runs; mirrors the web "Review with Claude". No-op
+    /// without a cwd. The runner is async and shells out, so we hop off the main
+    /// actor and publish the result back on it.
+    func runReview(_ id: String) {
+        guard let cwd = cwd(of: id), !reviewRunning.contains(id) else { return }
+        let files = diffBySession[id]?.files ?? []
+        let comments = comments(id)
+        reviewRunning.insert(id)
+        Task {
+            let now = Int(Date().timeIntervalSince1970 * 1000)
+            let result = await JuancodeServices.runReview(
+                cwd: cwd, files: files, comments: comments, now: now)
+            reviewBySession[id] = result
+            reviewRunning.remove(id)
+        }
+    }
+
     /// Stage everything and commit, off the main actor. Refreshes the diff + git
     /// state and surfaces a status note on success/failure. Mirrors the web commit
     /// mutation in GitActions.
@@ -673,6 +755,7 @@ final class AppModel: ObservableObject {
         appState.registry.get(id)?.kill()
         appState.store.delete(id)
         activityCancels[id]?(); activityCancels[id] = nil
+        queuedDrafts[id] = nil
         if selection == id { selection = nil }
         refresh()
         if let wt = meta?.worktreePath {

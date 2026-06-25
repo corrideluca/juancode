@@ -24,6 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        // Match the terminal: force a dark, pure-black window chrome instead of the
+        // default system gray so the SwiftUI panels blend into the SwiftTerm views.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
         // Make terminal Ctrl-C (SIGINT) and SIGTERM quit the app cleanly. The GUI
         // run loop doesn't honour the default SIGINT disposition, so we monitor
         // the signals via dispatch sources (which fire regardless of disposition)
@@ -52,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct JuancodeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
+    @StateObject private var oracle: OracleModel
 
     init() {
         let state: AppState
@@ -60,7 +65,9 @@ struct JuancodeApp: App {
         } catch {
             fatalError("Failed to open juancode database: \(error)")
         }
-        _model = StateObject(wrappedValue: AppModel(appState: state))
+        let appModel = AppModel(appState: state)
+        _model = StateObject(wrappedValue: appModel)
+        _oracle = StateObject(wrappedValue: OracleModel(app: appModel))
         AppEnv.state = state
 
         // Boot the embedded server so remote clients can attach to the same
@@ -82,6 +89,7 @@ struct JuancodeApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                .environmentObject(oracle)
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
