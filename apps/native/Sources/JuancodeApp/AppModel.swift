@@ -109,11 +109,10 @@ final class AppModel: ObservableObject {
             .max { $0.meta.createdAt < $1.meta.createdAt }
     }
 
-    /// The most recently-created persisted (incl. exited) session rooted in `cwd`.
-    func mostRecentPersisted(cwd: String) -> SessionMeta? {
-        appState.store.list()
-            .filter { $0.cwd == cwd }
-            .max { $0.createdAt < $1.createdAt }
+    /// All persisted (incl. exited) sessions rooted in `cwd`. Used to find/clean up
+    /// the pinned Oracle agent's prior sessions.
+    func persistedSessions(inCwd cwd: String) -> [SessionMeta] {
+        appState.store.list().filter { $0.cwd == cwd }
     }
 
     @discardableResult

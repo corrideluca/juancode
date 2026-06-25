@@ -85,14 +85,11 @@ final class OracleModel: ObservableObject {
             oracleSessionId = existing.id
             return
         }
-        if let persisted = app.mostRecentPersisted(cwd: controlDir) {
-            oracleSessionId = persisted.id
-            Task {
-                await app.reactivate(persisted.id)
-                if !app.isLive(persisted.id) { spawnAgent() }
-            }
-            return
-        }
+        // Don't resume a prior Oracle conversation — its CLI session may be gone
+        // (claude/codex print "No conversation found …" and exit, leaving a dead
+        // session). Oracle's durable state lives in its bd tracker + files, not the
+        // chat, so we always start fresh and clear out the stale exited sessions.
+        for meta in app.persistedSessions(inCwd: controlDir) { app.delete(meta.id) }
         spawnAgent()
     }
 
