@@ -186,6 +186,27 @@ final class WebSocketConnection: @unchecked Sendable {
                 send(.error(sessionId: sessionId, message: "Failed to resume: \(errMsg(error))"))
             }
 
+        case let .adoptExternal(provider, cliSessionId, cwd, startMs, cols, rows):
+            guard let pid = ProviderId(rawValue: provider) else {
+                send(.error(sessionId: nil, message: "Unknown provider: \(provider)")); return
+            }
+            // We already own this conversation — don't adopt it twice.
+            guard !state.store.usedCliSessionIds().contains(cliSessionId) else { return }
+            let meta = SessionMeta.adopting(provider: pid, cliSessionId: cliSessionId,
+                                            cwd: cwd, startMs: startMs)
+            state.store.insert(meta)
+            do {
+                // Empty prior scrollback: the CLI reprints its own context on resume.
+                let session = try state.registry.resume(meta, cols: cols, rows: rows, priorScrollback: [])
+                send(.created(session: session.meta))
+                subscribe(session.id)
+                send(.attached(sessionId: session.id,
+                               scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
+                               session: session.meta))
+            } catch {
+                send(.error(sessionId: meta.id, message: "Failed to resume: \(errMsg(error))"))
+            }
+
         case let .setSkipPermissions(sessionId, skip, cols, rows):
             guard state.registry.get(sessionId) != nil else {
                 send(.error(sessionId: sessionId, message: "Session is not running")); return
