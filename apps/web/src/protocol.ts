@@ -1,6 +1,12 @@
 /**
  * WebSocket wire protocol — mirror of `apps/server/src/protocol.ts`.
  * Keep the two files in sync.
+ *
+ * The Mac app's embedded server speaks this same wire format via its Codable
+ * mirror `apps/native/Sources/JuancodeServer/WireProtocol.swift`, so this one
+ * web app is a remote client for either backend (see `lib/socket.ts` /
+ * `lib/api.ts`, which use same-origin relative URLs). Changes here must land in
+ * all three.
  */
 
 export type ProviderId = "claude" | "codex";
