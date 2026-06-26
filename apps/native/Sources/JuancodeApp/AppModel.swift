@@ -75,6 +75,7 @@ final class AppModel {
         for s in appState.registry.all() { watch(s) }
         refresh()
         restoreTracked()
+        restoreRecurringTasks()
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on.
         NotificationCenter.default.addObserver(
@@ -918,6 +919,107 @@ final class AppModel {
         }
         if archived, selection == id { selection = nil }
         refresh()
+    }
+
+    // MARK: - Recurring tasks (juancode-dgp)
+
+    /// Recurring tasks, keyed by `RecurringTask.id`. A fixed-interval tick spawns a
+    /// fresh agent session in each due task's folder with its prompt as initial input.
+    var recurringTasks: [String: RecurringTask] = [:]
+    /// How often the scheduler wakes to check for due tasks. Bounds fire precision —
+    /// fine for the minutes-plus cadence recurring tasks are meant for.
+    private let scheduleTickInterval: Duration = .seconds(30)
+    private var scheduleLoop: Task<Void, Never>?
+
+    /// All recurring tasks, soonest-to-fire first, for the future management UI.
+    var recurringTasksList: [RecurringTask] {
+        recurringTasks.values.sorted { $0.nextFireAt < $1.nextFireAt }
+    }
+
+    /// Register a recurring task and ensure the scheduler is running. Returns the
+    /// created task. First run is one interval out (we don't fire on creation).
+    @discardableResult
+    func addRecurringTask(title: String, cwd: String, provider: ProviderId, prompt: String,
+                          intervalSeconds: Int, skipPermissions: Bool = true) -> RecurringTask {
+        let now = nowMs()
+        let task = RecurringTask(
+            title: title, cwd: cwd, provider: provider, prompt: prompt,
+            intervalSeconds: intervalSeconds, skipPermissions: skipPermissions,
+            createdAt: now, nextFireAt: initialFireTime(createdAt: now, intervalSeconds: intervalSeconds))
+        recurringTasks[task.id] = task
+        persistRecurringTasks()
+        startScheduleLoop()
+        return task
+    }
+
+    /// Stop and forget a recurring task. Stops the scheduler when none remain.
+    func removeRecurringTask(_ id: String) {
+        recurringTasks[id] = nil
+        persistRecurringTasks()
+        if recurringTasks.isEmpty { scheduleLoop?.cancel(); scheduleLoop = nil }
+    }
+
+    /// Pause or resume a recurring task without losing it.
+    func setRecurringTaskEnabled(_ id: String, enabled: Bool) {
+        guard var task = recurringTasks[id] else { return }
+        task.enabled = enabled
+        // Resuming a task that's overdue shouldn't fire a backlog — reschedule from now.
+        if enabled, task.nextFireAt <= nowMs() {
+            task.nextFireAt = nextRecurringFireTime(
+                firedAt: nowMs(), intervalSeconds: task.intervalSeconds, now: nowMs())
+        }
+        recurringTasks[id] = task
+        persistRecurringTasks()
+        if enabled { startScheduleLoop() }
+    }
+
+    private static let recurringTasksDefaultsKey = "juancode.recurringTasks.v1"
+
+    private func persistRecurringTasks() {
+        let list = Array(recurringTasks.values)
+        if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: Self.recurringTasksDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.recurringTasksDefaultsKey)
+        }
+    }
+
+    private func restoreRecurringTasks() {
+        guard let data = UserDefaults.standard.data(forKey: Self.recurringTasksDefaultsKey),
+              let list = try? JSONDecoder().decode([RecurringTask].self, from: data) else { return }
+        for task in list { recurringTasks[task.id] = task }
+        if recurringTasks.values.contains(where: \.enabled) { startScheduleLoop() }
+    }
+
+    private func startScheduleLoop() {
+        guard scheduleLoop == nil else { return }
+        scheduleLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.fireDueRecurringTasksOnce()
+                try? await Task.sleep(for: self?.scheduleTickInterval ?? .seconds(30))
+            }
+        }
+    }
+
+    /// One scheduler pass: spawn a fresh session for every due task and reschedule it.
+    func fireDueRecurringTasksOnce() async {
+        let now = nowMs()
+        for task in dueRecurringTasks(Array(recurringTasks.values), now: now) {
+            // The task may have been removed/paused while we were off-actor.
+            guard let current = recurringTasks[task.id], current.enabled else { continue }
+            // Spawn a fresh session in the project, seeded with the prompt. Don't steal
+            // focus — recurring runs are unattended background work.
+            _ = await create(provider: current.provider, cwd: current.cwd,
+                             skipPermissions: current.skipPermissions, isolateWorktree: false,
+                             initialInput: current.prompt, select: false)
+            if var t = recurringTasks[task.id] {
+                t.lastFiredAt = now
+                t.nextFireAt = nextRecurringFireTime(
+                    firedAt: now, intervalSeconds: t.intervalSeconds, now: now)
+                recurringTasks[task.id] = t
+            }
+        }
+        persistRecurringTasks()
     }
 
     // MARK: - Changes panel (working-tree diff + inline comments + git actions) — juancode-3bq
