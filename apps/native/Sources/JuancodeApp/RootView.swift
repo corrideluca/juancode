@@ -579,14 +579,15 @@ private struct FolderHeader: View {
             FolderIssues(cwd: group.cwd)
             FolderPrs(cwd: group.cwd)
         }
-        // Give each project a distinct, full-width bar: a subtle raised fill for
-        // contrast against the session rows, plus a top divider so projects read as
-        // separate sections.
+        // Give each project a distinct, rounded bar: a subtle raised fill for contrast
+        // against the session rows. Slight horizontal inset so the rounded corners read.
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.06))
-        .overlay(alignment: .top) { Divider() }
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.white.opacity(0.06)))
+        .padding(.horizontal, 6)
         .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd) }
     }
 }
