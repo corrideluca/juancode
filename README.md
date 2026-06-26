@@ -42,14 +42,15 @@ Open http://localhost:5280, pick a provider and a working directory, and start a
 
 ## Configuration
 
-| Env var                | Default            | Purpose                          |
-| ---------------------- | ------------------ | -------------------------------- |
-| `JUANCODE_PORT`        | `4280`             | Server port                      |
-| `JUANCODE_DATA_DIR`    | `./data`           | Where the sqlite db lives        |
-| `JUANCODE_DEFAULT_CWD` | your home dir      | Default dir for the dir browser  |
-| `JUANCODE_CLAUDE_BIN`  | `claude`           | Path to the Claude CLI           |
-| `JUANCODE_CODEX_BIN`   | `codex`            | Path to the Codex CLI            |
-| `JUANCODE_TOKEN`       | _(unset)_          | Access token for remote use (see below) |
+| Env var                | Default                 | Purpose                                                                                                       |
+| ---------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `JUANCODE_PORT`        | `4280`                  | Server port                                                                                                   |
+| `JUANCODE_DATA_DIR`    | `./data`                | Where the sqlite db lives                                                                                     |
+| `JUANCODE_DEFAULT_CWD` | your home dir           | Default dir for the dir browser                                                                               |
+| `JUANCODE_CLAUDE_BIN`  | `claude`                | Path to the Claude CLI                                                                                        |
+| `JUANCODE_CODEX_BIN`   | `codex`                 | Path to the Codex CLI                                                                                         |
+| `JUANCODE_TOKEN`       | _(unset)_               | Access token for remote use (see below)                                                                       |
+| `JUANCODE_SERVER`      | `http://localhost:4280` | Backend `pnpm dev:web` proxies to — point it at a Mac app's embedded server (e.g. `http://my-mac.local:4280`) |
 
 ## Remote access (use it from your phone)
 
