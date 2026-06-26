@@ -709,7 +709,7 @@ function FileCard({
                     changeKey: key,
                   })
                 }
-                className="text-xs text-neutral-500 hover:text-neutral-300"
+                className="rounded px-1.5 py-0.5 text-xs text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
               >
                 Reply
               </button>

@@ -62,10 +62,10 @@ export function TerminalPanel({ cwd, onClose }: { cwd: string; onClose: () => vo
             <div
               key={g.id}
               onClick={() => setActiveId(g.id)}
-              className={`group flex cursor-pointer items-center gap-1.5 rounded px-2 py-0.5 ${
+              className={`group flex cursor-pointer items-center gap-1.5 rounded px-2 py-0.5 transition-colors ${
                 g.id === activeId
-                  ? "bg-neutral-800 text-neutral-100"
-                  : "text-neutral-400 hover:text-neutral-200"
+                  ? "bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
+                  : "text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200"
               }`}
             >
               <span className="font-mono">{`zsh ${i + 1}`}</span>

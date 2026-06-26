@@ -5,10 +5,12 @@ import JuancodeCore
 import JuancodeServices
 
 struct RootView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
+    @Environment(OracleModel.self) private var oracle
 
     var body: some View {
-        NavigationSplitView {
+        @Bindable var model = model
+        return NavigationSplitView {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 280)
         } detail: {
@@ -16,9 +18,41 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .background(WindowBackground(color: .black))
-        // The global Oracle helper floats over the whole window, bottom-right,
-        // regardless of which session/workdir is focused (juancode-wjg).
-        .overlay(alignment: .bottomTrailing) { OracleDock() }
+        // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs and
+        // Worktrees live in the window toolbar — reachable from any session.
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { model.showingTrackedPrs = true } label: {
+                    Label("Tracked PRs", systemImage: "checklist")
+                }
+                .help("PRs under watch — CI-fix loops")
+                .clickCursor()
+                Button { model.showingWorktrees = true; model.loadWorktrees() } label: {
+                    Label("Worktrees", systemImage: "externaldrive.badge.minus")
+                }
+                .help("Manage / clean git worktrees")
+                .clickCursor()
+                Button { oracle.open(tab: .issues) } label: {
+                    Label("Issues", systemImage: "tray.full")
+                }
+                .help("Global issues (Oracle tracker)")
+                .clickCursor()
+                Button { oracle.open(tab: .chat) } label: {
+                    Label("Oracle", systemImage: "sparkles")
+                }
+                .help("Oracle — global orchestration (⌃Space)")
+                .clickCursor()
+            }
+        }
+        // The Oracle helper opens as a centered overlay over the whole window,
+        // from the toolbar or ⌃Space (juancode-wjg / juancode-6sw).
+        .overlay { OracleDock() }
+        .sheet(isPresented: $model.showingWorktrees) {
+            WorktreesSheet()
+        }
+        .sheet(isPresented: $model.showingTrackedPrs) {
+            TrackedPrsSheet()
+        }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()
         }
@@ -67,12 +101,14 @@ private struct FolderGroup: Identifiable {
 }
 
 struct SidebarView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
 
     /// Free-text filter over folder names/paths + session titles.
     @State private var query = ""
     /// When off (default) archived sessions are hidden from the list.
     @State private var showArchived = false
+    /// Project folders the user has collapsed (by cwd); their session rows are hidden.
+    @State private var collapsedFolders: Set<String> = []
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
@@ -95,9 +131,10 @@ struct SidebarView: View {
     /// the web sidebar.
     private var groups: [FolderGroup] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        // Own sessions + discovered terminal sessions, grouped by project together.
         // Hide the pinned Oracle agent session — it's reachable from the Oracle dock,
         // not the per-project sidebar (juancode-wjg).
-        let nonOracle = model.sessions.filter { $0.cwd != OraclePaths.controlDir }
+        let nonOracle = (model.sessions + model.externalSessions).filter { $0.cwd != OraclePaths.controlDir }
         let visible = showArchived ? nonOracle : nonOracle.filter { !$0.archived }
         let filtered = q.isEmpty
             ? visible
@@ -116,7 +153,8 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        @Bindable var model = model
+        return VStack(spacing: 0) {
             TextField("Filter sessions…", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12))
@@ -125,28 +163,53 @@ struct SidebarView: View {
             List(selection: $model.selection) {
                 ForEach(groups) { group in
                     Section {
-                        ForEach(group.sessions, id: \.id) { meta in
-                            SessionRow(meta: meta, activity: model.activity(meta.id), live: model.isLive(meta.id))
-                                .tag(meta.id)
-                                .contextMenu {
-                                    Button("Rename…") { beginRename(meta) }
-                                    if meta.archived {
-                                        Button("Unarchive") { model.setArchived(meta.id, false) }
-                                    } else {
-                                        Button("Archive") { model.setArchived(meta.id, true) }
+                        if !collapsedFolders.contains(group.cwd) {
+                            ForEach(group.sessions, id: \.id) { meta in
+                                let external = model.isExternal(meta.id)
+                                SessionRow(meta: meta, activity: model.activity(meta.id),
+                                           live: model.isLive(meta.id), external: external,
+                                           tracked: external ? nil : model.trackedPr(forSession: meta.id),
+                                           onResume: external ? { model.importExternalSession(meta.id) } : nil)
+                                    .tag(meta.id)
+                                    .selectionDisabled(external)
+                                    .contextMenu {
+                                        if model.isExternal(meta.id) {
+                                            Button("Resume in juancode") { model.importExternalSession(meta.id) }
+                                        } else {
+                                            Button("Rename…") { beginRename(meta) }
+                                            if meta.archived {
+                                                Button("Unarchive") { model.setArchived(meta.id, false) }
+                                            } else {
+                                                Button("Archive") { model.setArchived(meta.id, true) }
+                                            }
+                                            Divider()
+                                            Button("Delete", role: .destructive) { model.delete(meta.id) }
+                                        }
                                     }
-                                    Divider()
-                                    Button("Delete", role: .destructive) { model.delete(meta.id) }
-                                }
+                            }
                         }
                     } header: {
-                        FolderHeader(group: group)
+                        FolderHeader(group: group, collapsed: collapsedFolders.contains(group.cwd)) {
+                            if collapsedFolders.contains(group.cwd) {
+                                collapsedFolders.remove(group.cwd)
+                            } else {
+                                collapsedFolders.insert(group.cwd)
+                            }
+                        }
                     }
                 }
                 if groups.isEmpty {
                     Text(query.isEmpty ? "No sessions yet." : "No matching sessions.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
+                }
+                if model.externalHasMore {
+                    Button { model.loadMoreExternalSessions() } label: {
+                        Label("Load more terminal sessions", systemImage: "ellipsis.circle")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .clickCursor()
                 }
             }
             .listStyle(.sidebar)
@@ -176,18 +239,22 @@ struct SidebarView: View {
             }
         }
         .background(Color.black)
+        .onAppear { model.loadExternalSessions() }
         .toolbar {
             ToolbarItem {
                 Button { showingSearch = true } label: { Image(systemName: "magnifyingglass") }
                     .help("Search transcripts")
+                    .clickCursor()
             }
             ToolbarItem {
                 Button { showingStatus = true } label: { Image(systemName: "shield.lefthalf.filled") }
                     .help("Auth & MCP status")
+                    .clickCursor()
             }
             ToolbarItem {
                 Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
                     .help("New session")
+                    .clickCursor()
             }
         }
         .sheet(isPresented: $showingSearch) {
@@ -208,6 +275,7 @@ struct SidebarView: View {
                 renaming = nil
             }
         }
+        .perfTrackBody()
     }
 
     private func beginRename(_ meta: SessionMeta) {
@@ -220,17 +288,31 @@ struct SidebarView: View {
 /// running-session badge, and a per-folder "+" agent menu that spawns a new
 /// session in this folder. Mirrors the web sidebar's folder `<summary>`.
 private struct FolderHeader: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let group: FolderGroup
+    let collapsed: Bool
+    let toggle: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(group.name).lineLimit(1).help(group.cwd)
-            if group.running > 0 {
-                Text("\(group.running) running")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.green)
+            // Chevron + name + running-count form the collapse toggle; the "+" menu
+            // and PR/issue badges stay separately clickable.
+            Button(action: toggle) {
+                HStack(spacing: 6) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(group.name).lineLimit(1).help(group.cwd)
+                    if group.running > 0 {
+                        Text("\(group.running) running")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.green)
+                    }
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .clickCursor()
             Spacer()
             Menu {
                 ForEach(ProviderId.allCases, id: \.self) { p in
@@ -245,6 +327,7 @@ private struct FolderHeader: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("New session in \(group.cwd)")
+            .clickCursor()
             FolderIssues(cwd: group.cwd)
             FolderPrs(cwd: group.cwd)
         }
@@ -264,7 +347,7 @@ func prPrompt(_ pr: PullRequest) -> String {
 /// "Mine" (author) and "Assigned to me" (assignee) filters, and per-PR
 /// Open / Work on / Track actions.
 private struct FolderPrs: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let cwd: String
     @State private var showing = false
     @State private var query = ""
@@ -314,6 +397,7 @@ private struct FolderPrs: View {
             .popover(isPresented: $showing, arrowEdge: .bottom) {
                 popover
             }
+            .clickCursor()
         }
     }
 
@@ -329,10 +413,12 @@ private struct FolderPrs: View {
                         .toggleStyle(.button)
                         .controlSize(.small)
                         .font(.system(size: 10))
+                        .clickCursor()
                     Toggle("Assigned (\(assignedCount))", isOn: $assignedOnly)
                         .toggleStyle(.button)
                         .controlSize(.small)
                         .font(.system(size: 10))
+                        .clickCursor()
                 }
             }
             .padding(8)
@@ -362,7 +448,7 @@ private struct FolderPrs: View {
 /// One PR in the popover: CI-status dot, title, draft badge, and the
 /// Open / Work on / Track actions.
 private struct PrRow: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let pr: PullRequest
     let cwd: String
     /// Called to dismiss the popover after an action that navigates away.
@@ -390,12 +476,14 @@ private struct PrRow: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.system(size: 11))
+                .clickCursor()
                 Button("Work on") {
                     dismiss()
                     model.workOnPr(pr, cwd: cwd)
                 }
                 .buttonStyle(.borderless)
                 .font(.system(size: 11))
+                .clickCursor()
                 // Track (juancode-it5): hand the PR to a dedicated agent session that
                 // watches for new review comments / CI status and auto-fixes the
                 // obvious ones, escalating real decisions back here.
@@ -405,11 +493,13 @@ private struct PrRow: View {
                         .buttonStyle(.borderless)
                         .font(.system(size: 11))
                         .help("Stop watching this PR (keeps the session)")
+                        .clickCursor()
                 } else {
                     Button("Track") { model.trackPr(pr, cwd: cwd) }
                         .buttonStyle(.borderless)
                         .font(.system(size: 11))
                         .help("Watch this PR — auto-fix review comments & CI, escalate decisions")
+                        .clickCursor()
                 }
                 Spacer()
             }
@@ -428,10 +518,12 @@ private struct PrRow: View {
                                 model.selection = t.sessionId
                             }
                             .buttonStyle(.borderless).font(.system(size: 9))
+                            .clickCursor()
                             Button("Dismiss") {
                                 model.resolveNotification(prId: t.id, notificationId: note.id)
                             }
                             .buttonStyle(.borderless).font(.system(size: 9))
+                            .clickCursor()
                         }
                     }
                 }
@@ -465,7 +557,7 @@ private struct PrRow: View {
 }
 
 /// A small pill showing what a tracked PR is currently doing.
-private struct TrackBadge: View {
+struct TrackBadge: View {
     let state: TrackState
     var body: some View {
         Text(label)
@@ -505,7 +597,7 @@ private struct TrackBadge: View {
 /// "Ready" filter and a per-issue "Work on" action that injects the issue's
 /// context into the folder's focused session.
 private struct FolderIssues: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let cwd: String
     @State private var showing = false
     @State private var query = ""
@@ -548,6 +640,7 @@ private struct FolderIssues: View {
             .popover(isPresented: $showing, arrowEdge: .bottom) {
                 popover
             }
+            .clickCursor()
         }
     }
 
@@ -562,6 +655,7 @@ private struct FolderIssues: View {
                         .toggleStyle(.button)
                         .controlSize(.small)
                         .font(.system(size: 10))
+                        .clickCursor()
                 }
             }
             .padding(8)
@@ -591,7 +685,7 @@ private struct FolderIssues: View {
 /// One bd issue in the popover: status dot, id, title, and a "Work on" action
 /// that injects the issue's context into the folder's focused agent session.
 private struct IssueRow: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let issue: BeadsIssue
     let cwd: String
     /// Called to dismiss the popover after an action that navigates away.
@@ -622,6 +716,7 @@ private struct IssueRow: View {
                 .buttonStyle(.borderless)
                 .font(.system(size: 11))
                 .help("Inject this issue's context into the focused session (starts one if none)")
+                .clickCursor()
                 Spacer()
             }
             .padding(.leading, 13)
@@ -646,6 +741,13 @@ struct SessionRow: View {
     let meta: SessionMeta
     let activity: SessionActivity?
     let live: Bool
+    /// A discovered terminal session not yet imported — shown with a marker and an
+    /// explicit Resume button (so it isn't triggered by hover/selection).
+    var external: Bool = false
+    /// The PR this session is tracking, if any — drives the PR label (juancode-kxy).
+    var tracked: TrackedPr? = nil
+    /// Resume action for an external row; the row is otherwise non-interactive.
+    var onResume: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -655,6 +757,31 @@ struct SessionRow: View {
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            if let t = tracked {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
+                    Text("#\(t.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+                }
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(trackColor(t.state).opacity(0.2))
+                .foregroundStyle(trackColor(t.state))
+                .clipShape(Capsule())
+                .help("Tracking PR #\(t.number) — \(t.state.rawValue)")
+            }
+            if external {
+                Image(systemName: "terminal")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .help("From your terminal")
+                if let onResume {
+                    Button(action: onResume) {
+                        Image(systemName: "play.circle").font(.system(size: 13))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Resume this conversation in juancode")
+                    .clickCursor()
+                }
+            }
             if let label = meta.usage?.badgeLabel {
                 Text(label)
                     .font(.system(size: 10).monospacedDigit())
@@ -676,6 +803,14 @@ struct SessionRow: View {
         (meta.cwd as NSString).lastPathComponent
     }
 
+    private func trackColor(_ state: TrackState) -> Color {
+        switch state {
+        case .watching: return .secondary
+        case .fixing: return .blue
+        case .needsDecision: return .orange
+        }
+    }
+
     private var dotColor: Color {
         guard live else { return .secondary.opacity(0.4) }
         switch activity {
@@ -687,7 +822,7 @@ struct SessionRow: View {
 }
 
 struct DetailView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         if let id = model.selection, let meta = model.sessions.first(where: { $0.id == id }) {
@@ -707,62 +842,8 @@ struct DetailView: View {
 /// changes panel (diff + inline comments + git actions) or the folder's bd issues.
 private enum SidePanelTab: String, CaseIterable { case changes = "Changes", issues = "Issues" }
 
-/// A thin draggable vertical divider that resizes the pane to its RIGHT by writing
-/// `width` (clamped to [min, max]). Dragging left grows the right pane; dragging
-/// right shrinks it. Mirrors `ChangesPanel`'s left-pane handle, sign-flipped.
-private struct PanelResizeHandle: View {
-    @Binding var width: Double
-    let min: Double
-    let max: Double
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.secondary.opacity(0.18))
-            .frame(width: 1)
-            .overlay(
-                Rectangle().fill(Color.clear).frame(width: 8)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                    }
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                width = Swift.min(max, Swift.max(min, width - value.translation.width))
-                            })
-            )
-    }
-}
-
-/// A thin draggable horizontal divider that resizes the pane BELOW it by writing
-/// `height` (clamped to [min, max]). Dragging up grows the bottom pane; dragging
-/// down shrinks it. The horizontal sibling of `PanelResizeHandle`.
-private struct BottomResizeHandle: View {
-    @Binding var height: Double
-    let min: Double
-    let max: Double
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.secondary.opacity(0.18))
-            .frame(height: 1)
-            .overlay(
-                Rectangle().fill(Color.clear).frame(height: 8)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
-                    }
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                height = Swift.min(max, Swift.max(min, height - value.translation.height))
-                            })
-            )
-    }
-}
-
 struct SessionContainer: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let meta: SessionMeta
     /// Active right-panel tab, remembered app-wide.
     @AppStorage("session.sidePanel.tab") private var tabRaw: String = SidePanelTab.changes.rawValue
@@ -811,6 +892,7 @@ struct SessionContainer: View {
                 } else {
                     Button("Reactivate") { Task { await model.reactivate(meta.id) } }
                         .controlSize(.small)
+                        .clickCursor()
                 }
                 Button {
                     bottomShown.toggle()
@@ -822,12 +904,14 @@ struct SessionContainer: View {
                     Image(systemName: bottomShown ? "menubar.dock.rectangle.badge.record" : "menubar.dock.rectangle")
                 }
                 .help(bottomShown ? "Hide the terminal panel" : "Show the terminal panel")
+                .clickCursor()
                 Button {
                     panelShown.toggle()
                 } label: {
                     Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
                 }
                 .help(panelShown ? "Hide the Changes / Issues panel" : "Show the Changes / Issues panel")
+                .clickCursor()
             }
             .padding(8)
             Divider()
@@ -840,14 +924,14 @@ struct SessionContainer: View {
                         MessageQueueComposer(sessionId: meta.id)
                     }
                     if bottomShown {
-                        BottomResizeHandle(height: $bottomHeight, min: 120, max: 720)
+                        DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720)
                         BottomTerminalPanel(cwd: meta.cwd)
                             .frame(height: CGFloat(bottomHeight))
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if panelShown {
-                    PanelResizeHandle(width: $panelWidth, min: 280, max: 760)
+                    DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: 760)
                     sidePanel
                         .frame(width: CGFloat(panelWidth))
                 }
@@ -855,6 +939,7 @@ struct SessionContainer: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle(meta.title)
+        .perfTrackBody()
     }
 
     /// The right-side panel: a Changes | Issues tab switcher hosting the existing
@@ -917,7 +1002,7 @@ struct SessionContainer: View {
 /// the turn to finish. Mirrors the web `MessageQueue`: shows a "Queued" pill with a
 /// Cancel button when something is buffered, otherwise a TextField + Queue button.
 private struct MessageQueueComposer: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let sessionId: String
     @State private var draft = ""
 
@@ -953,6 +1038,7 @@ private struct MessageQueueComposer: View {
                 .buttonStyle(.borderless)
                 .font(.system(size: 11))
                 .help("Cancel queued message")
+                .clickCursor()
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
         } else {
@@ -966,6 +1052,7 @@ private struct MessageQueueComposer: View {
                     .font(.system(size: 12))
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .help("Buffer this message; it sends automatically when the agent goes idle")
+                    .clickCursor()
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
         }
@@ -973,12 +1060,13 @@ private struct MessageQueueComposer: View {
 }
 
 struct NewSessionView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
     @State private var provider: ProviderId = .claude
     @State private var cwd: String = Config.defaultCwd
-    @State private var skipPermissions = false
+    // New sessions default to accept-all (skip permission prompts); toggle off per session.
+    @State private var skipPermissions = true
     @State private var isolateWorktree = false
     @State private var creating = false
     @State private var showingDirPicker = false
@@ -995,16 +1083,18 @@ struct NewSessionView: View {
                 HStack {
                     TextField("Working directory", text: $cwd)
                     Button("Choose…") { showingDirPicker = true }
+                        .clickCursor()
                 }
                 Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
                 Toggle("Isolate in a fresh git worktree", isOn: $isolateWorktree)
             }
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).clickCursor()
                 Button(creating ? "Starting…" : "Start") { start() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(creating || cwd.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .clickCursor()
             }
         }
         .padding(20)

@@ -138,9 +138,9 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
               <button
                 type="button"
                 onClick={() => setMineOnly((cur) => !cur)}
-                className={`shrink-0 rounded px-1.5 py-1 text-[10px] font-medium ${
+                className={`shrink-0 rounded px-1.5 py-1 text-[10px] font-medium transition-colors ${
                   mineOnly
-                    ? "bg-sky-600/30 text-sky-300"
+                    ? "bg-sky-600/30 text-sky-300 hover:bg-sky-600/40"
                     : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
                 }`}
               >
@@ -196,7 +196,7 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
                       setOpen(false);
                       onNewSession("claude", cwd, prPrompt(pr));
                     }}
-                    className="text-neutral-300 hover:text-neutral-100"
+                    className="rounded px-1 text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
                   >
                     ＋ session
                   </button>

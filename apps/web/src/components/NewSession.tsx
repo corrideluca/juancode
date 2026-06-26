@@ -74,10 +74,10 @@ export function NewSession() {
           <button
             key={p.id}
             onClick={() => setProvider(p.id)}
-            className={`rounded-md border px-4 py-2 text-sm ${
+            className={`rounded-md border px-4 py-2 text-sm transition-colors ${
               provider === p.id
-                ? "border-sky-500 bg-sky-500/10 text-sky-300"
-                : "border-neutral-700 text-neutral-300 hover:border-neutral-500"
+                ? "border-sky-500 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20"
+                : "border-neutral-700 text-neutral-300 hover:border-neutral-500 hover:bg-neutral-800/40"
             }`}
           >
             {p.label}

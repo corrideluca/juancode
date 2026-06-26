@@ -58,14 +58,22 @@ public final class ActivityDetector: @unchecked Sendable {
     // MARK: - internals (always on `queue`)
 
     private func _feed(_ data: String) {
+        // Cheap gate before the expensive ANSI-strip regex (this runs on every pty
+        // chunk of every live session, including unfocused/background ones). The
+        // working-line regex requires the literal word "interrupt", and the
+        // stripped `tail` is only ever consulted at settle time — which only happens
+        // after a busy period. So when the session is idle and the chunk can't be
+        // starting a turn, there's nothing to do.
+        let mightStart = data.range(of: "interrupt", options: .caseInsensitive) != nil
+        guard state == .busy || mightStart else { return }
+
         let stripped = Self.stripAnsi(data)
         if !stripped.isEmpty {
-            let combined = tail + stripped
-            tail = String(combined.suffix(Self.tailLimit))
+            tail = String((tail + stripped).suffix(Self.tailLimit))
         }
         // Matched against the current frame only (not the historical tail) so it
         // genuinely marks the *start* of a turn.
-        if Self.workingRe.firstMatch(in: stripped) {
+        if mightStart, Self.workingRe.firstMatch(in: stripped) {
             markBusy()
         } else if state == .busy {
             armSettle()

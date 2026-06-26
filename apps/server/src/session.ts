@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import * as pty from "node-pty";
 import { SCROLLBACK_LIMIT } from "./config.ts";
-import { appendScrollback } from "./scrollback.ts";
+import { Scrollback } from "./scrollback.ts";
 import { captureCodexSessionId } from "./codexSession.ts";
 import { sessionDb } from "./db.ts";
 import { PROVIDERS } from "./providers.ts";
@@ -22,7 +22,7 @@ const TITLE_POLL_MS = 4000;
 export class Session {
   readonly meta: SessionMeta;
   private readonly proc: pty.IPty;
-  private scrollback = "";
+  private readonly scrollback: Scrollback;
   private readonly outputListeners = new Set<OutputListener>();
   private readonly exitListeners = new Set<ExitListener>();
   private readonly activityListeners = new Set<ActivityListener>();
@@ -43,7 +43,7 @@ export class Session {
     this.meta = meta;
     // Resuming an exited session carries its prior scrollback forward so the
     // history survives the new pty (and isn't clobbered by the persist below).
-    this.scrollback = seedScrollback;
+    this.scrollback = new Scrollback(SCROLLBACK_LIMIT, seedScrollback);
     const spec = PROVIDERS[meta.provider];
 
     this.proc = pty.spawn(spec.command, args, {
@@ -56,7 +56,7 @@ export class Session {
     });
 
     if (isNew) sessionDb.insert(this.meta);
-    else sessionDb.update(this.meta, this.scrollback);
+    else sessionDb.update(this.meta, this.scrollback.replay);
 
     // For Codex we can't pin the session id, so discover it from the rollout file.
     if (!spec.pinsSessionId && this.meta.cliSessionId === null) {
@@ -152,7 +152,7 @@ export class Session {
   }
 
   getScrollback(): string {
-    return this.scrollback;
+    return this.scrollback.replay;
   }
 
   write(data: string): void {
@@ -163,14 +163,25 @@ export class Session {
    * Type `text` into the session and submit it, once the CLI's TUI has rendered.
    * Used to seed a fresh session with context (e.g. a PR to work on). We wait for
    * the first output so the TUI has entered raw mode before we type, then add a
-   * short delay and a carriage return to submit.
+   * short delay.
+   *
+   * The text is delivered as a bracketed paste (`ESC[200~ … ESC[201~`) and the
+   * submitting Enter is sent as a separate keystroke a beat later. This matters for
+   * multi-line seeds (e.g. an Oracle dispatch carrying an issue description): writing
+   * `${trimmed}\r` in one burst makes the CLI auto-detect the fast multi-line chunk
+   * as a paste and treat the trailing CR as a literal newline, leaving the message
+   * sitting in the input box unsent. Pasting first, then a lone CR, submits it.
    */
   autoSubmit(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
     const off = this.onOutput(() => {
       off();
-      setTimeout(() => this.write(`${trimmed}\r`), 500);
+      setTimeout(() => {
+        this.write(`\x1b[200~${trimmed}\x1b[201~`);
+        // Let the paste settle in the prompt before the submitting Enter.
+        setTimeout(() => this.write("\r"), 150);
+      }, 500);
     });
   }
 
@@ -270,7 +281,7 @@ export class Session {
   }
 
   private appendScrollback(data: string): void {
-    this.scrollback = appendScrollback(this.scrollback, data, SCROLLBACK_LIMIT);
+    this.scrollback.append(data);
   }
 
   private schedulePersist(): void {
@@ -287,6 +298,6 @@ export class Session {
       this.persistTimer = null;
     }
     this.meta.updatedAt = Date.now();
-    sessionDb.update(this.meta, this.scrollback);
+    sessionDb.update(this.meta, this.scrollback.replay);
   }
 }

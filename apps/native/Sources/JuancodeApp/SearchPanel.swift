@@ -9,7 +9,7 @@ import JuancodeServices
 /// snippet, and selects the matched session on click. Presented as a sheet from
 /// the sidebar toolbar's magnifying-glass button.
 struct SearchPanel: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
     /// Live text-field contents; debounced into `model.search` so we don't fire a
@@ -36,6 +36,7 @@ struct SearchPanel: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Close")
+                .clickCursor()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)

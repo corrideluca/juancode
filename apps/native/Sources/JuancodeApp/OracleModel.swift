@@ -1,5 +1,6 @@
 import Foundation
-import Combine
+import Observation
+import AppKit
 import JuancodeCore
 import JuancodeServices
 
@@ -12,27 +13,28 @@ import JuancodeServices
 /// `EnvironmentObject`) and leans on it for the real work: session creation,
 /// worktree isolation, and the live registry are all `AppModel`'s.
 @MainActor
-final class OracleModel: ObservableObject {
+@Observable
+final class OracleModel {
     private let app: AppModel
 
     /// True once the control dir is bootstrapped and the agent session is up.
-    @Published var ready = false
+    var ready = false
     /// Whatever went wrong during bootstrap, surfaced in the dock.
-    @Published var setupError: String?
+    var setupError: String?
     /// Whether the dock is expanded (vs. the collapsed floating button).
-    @Published var expanded = false
+    var expanded = false
     /// Which dock tab is showing.
-    @Published var tab: OracleTab = .issues
+    var tab: OracleTab = .issues
     /// The global bd tracker listing (control-dir cwd), loaded lazily + refreshable.
-    @Published var globalBeads: BeadsResult?
+    var globalBeads: BeadsResult?
     /// The pinned Oracle agent session id, once created/restored.
-    @Published var oracleSessionId: String?
+    var oracleSessionId: String?
 
     /// Byte offset into `dispatch.jsonl` we've consumed up to. Initialized to the
     /// file's end at bootstrap so we only act on dispatches made this run.
-    private var dispatchOffset = 0
-    private var loop: Task<Void, Never>?
-    private var beadsLoading = false
+    @ObservationIgnored private var dispatchOffset = 0
+    @ObservationIgnored private var loop: Task<Void, Never>?
+    @ObservationIgnored private var beadsLoading = false
     /// Last snapshot written to `state.json`, to skip rewriting an unchanged file
     /// every tick (the timestamp is excluded from the comparison).
     private var lastState: OracleState?
@@ -45,6 +47,29 @@ final class OracleModel: ObservableObject {
 
     /// The live Oracle agent session, if running.
     var session: Session? { oracleSessionId.flatMap { app.liveSession($0) } }
+
+    /// Count of open global tracker items, for the top-bar Issues badge.
+    var openCount: Int {
+        guard let r = globalBeads, r.available else { return 0 }
+        return r.issues.filter { $0.status != "closed" }.count
+    }
+
+    /// Open the Oracle panel on a specific tab (from the top command bar / shortcuts).
+    /// The agent CLI is spawned here — on open, when the drawer's size is known — not
+    /// at launch, so it boots into the panel's grid rather than the main window's.
+    func open(tab: OracleTab) {
+        self.tab = tab
+        expanded = true
+        bootstrap()
+        ensureAgentSession()
+        if tab == .issues { loadGlobalBeads() }
+    }
+
+    /// Toggle the panel (⌃Space). Bootstraps + brings the agent up on open.
+    func toggle() {
+        expanded.toggle()
+        if expanded { bootstrap(); ensureAgentSession() }
+    }
 
     init(app: AppModel) { self.app = app }
 
@@ -69,12 +94,21 @@ final class OracleModel: ObservableObject {
         ready = true
         startLoop()
         Task {
-            // Stand up the bd tracker, then load it and bring the agent up. The
-            // agent's cwd already exists (prep above), so it can start in parallel.
+            // Stand up the bd tracker and load the global issue listing. The agent
+            // itself is NOT spawned here — it comes up lazily when the panel is first
+            // opened (open()/toggle()), so it boots sized to the drawer rather than at
+            // launch when the drawer's size isn't known yet.
             await ensureOracleTracker()
-            ensureAgentSession()
             loadGlobalBeads()
         }
+    }
+
+    /// Bring the Oracle agent back up from the chat tab's "Start Oracle" button.
+    /// `bootstrap()` is a one-shot (its guard no-ops once `ready`/`loop` are set),
+    /// so once the agent session exits the chat needs its own re-entry point.
+    func startAgent() {
+        guard ready else { bootstrap(); return }
+        ensureAgentSession()
     }
 
     /// Restore the most recent persisted Oracle session (reactivating it) or spawn
@@ -97,10 +131,29 @@ final class OracleModel: ObservableObject {
         Task {
             // Accept-all so Oracle can run bd + manage its mailbox without prompts;
             // it operates only in its own control dir. Don't steal the selection.
+            // Spawn sized to the Oracle drawer (not the main window) so the agent CLI's
+            // alt-screen boots at the drawer's width — otherwise it renders at the wide
+            // main-window size and wraps into garbage inside the narrower drawer.
+            let grid = dockGrid
             let s = await app.create(provider: .claude, cwd: controlDir, skipPermissions: true,
-                                     isolateWorktree: false, initialInput: oracleSeedPrompt, select: false)
+                                     isolateWorktree: false, initialInput: oracleSeedPrompt,
+                                     select: false, cols: grid.cols, rows: grid.rows)
             oracleSessionId = s?.id
         }
+    }
+
+    /// Estimate the Oracle drawer's terminal grid so the agent CLI boots matching it.
+    /// Width comes from the persisted drawer width; height is the live window's, since
+    /// the drawer is full-height. Cell metrics (~9.85×18pt) are the SwiftTerm
+    /// default-font dimensions measured from live sessions; the drawer chrome (header +
+    /// tab picker) costs ~92pt of height. Approximate is fine — the live view fine-tunes.
+    private var dockGrid: (cols: Int, rows: Int) {
+        let w = max(460, (UserDefaults.standard.object(forKey: "oracle.panel.width") as? Double) ?? 600)
+        let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
+        let winH = Double(window?.contentView?.bounds.height ?? 820)
+        let cols = max(40, Int((w - 20) / 9.85))
+        let rows = max(14, Int((winH - 92) / 18.0))
+        return (cols, rows)
     }
 
     /// Refresh the global bd tracker listing (control-dir cwd). Coalesces calls.
@@ -168,7 +221,7 @@ final class OracleModel: ObservableObject {
             // Spawn (or seed) the agent in the target project. Selecting it lets the
             // user jump straight to freshly dispatched work.
             await app.create(provider: d.resolvedProvider, cwd: d.project,
-                             skipPermissions: false, isolateWorktree: d.worktree ?? false,
+                             skipPermissions: true, isolateWorktree: d.worktree ?? false,
                              initialInput: d.prompt, select: true)
         }
     }

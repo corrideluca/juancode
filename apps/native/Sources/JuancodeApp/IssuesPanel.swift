@@ -13,7 +13,7 @@ import JuancodeCore
 /// inject the issue's context into the folder's focused session (spawning one if
 /// none exists). Read-only visualization plus that send action — no create/edit.
 struct IssuesPanel: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let cwd: String
 
     /// Optionally surface closed issues too (the panel can afford to, unlike the
@@ -61,12 +61,14 @@ struct IssuesPanel: View {
                 if closedCount > 0 {
                     Toggle("Closed (\(closedCount))", isOn: $showClosed)
                         .toggleStyle(.button).controlSize(.small).font(.system(size: 10))
+                        .clickCursor()
                 }
                 Button { model.loadBeads(cwd) } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
                 .help("Refresh issues")
+                .clickCursor()
             }
             if result?.available ?? false {
                 TextField("Filter issues…", text: $query)
@@ -132,7 +134,7 @@ private struct IssueSectionHeader: View {
 /// One issue row in the panel: status dot, priority + type + dependency badges,
 /// id + title, and (for open issues) a "Work on" send-to-agent action.
 private struct IssuePanelRow: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let issue: BeadsIssue
     let cwd: String
 
@@ -164,6 +166,7 @@ private struct IssuePanelRow: View {
                         .buttonStyle(.borderless)
                         .font(.system(size: 11))
                         .help("Inject this issue's context into the focused session (starts one if none)")
+                        .clickCursor()
                 }
             }
         }

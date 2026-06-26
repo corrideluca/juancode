@@ -9,7 +9,7 @@ import JuancodeServices
 /// on `AppModel` (populated by `getAllStatus`, which shells into the real CLIs).
 /// Presented as a sheet from the sidebar toolbar, like `SearchPanel`.
 struct StatusPanel: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -23,11 +23,13 @@ struct StatusPanel: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(model.statusLoading)
+                .clickCursor()
                 Button { dismiss() } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
                 .help("Close")
+                .clickCursor()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)

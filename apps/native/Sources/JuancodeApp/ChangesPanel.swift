@@ -24,7 +24,7 @@ private struct EditorTarget: Identifiable {
 /// (juancode-49w) is out of scope; this view is self-contained so the Changes/Issues
 /// tab switcher (juancode-fmh) can host it as-is.
 struct ChangesPanel: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let sessionId: String
 
     /// Free-text filter over changed-file paths.
@@ -75,6 +75,7 @@ struct ChangesPanel: View {
                 onExit: { [id = target.id] in Task { @MainActor in closeEditor(id) } },
                 onForceClose: { target.pty.kill(); closeEditor(target.id) })
         }
+        .perfTrackBody()
     }
 
     /// Keep the tree selection valid as the diff reloads, and expand all folders the
@@ -115,48 +116,82 @@ struct ChangesPanel: View {
         (diff?.files ?? []).reduce((0, 0)) { ($0.0 + $1.additions, $0.1 + $1.deletions) }
     }
 
+    /// The header degrades gracefully in a narrow panel: one row when there's room,
+    /// otherwise the filter drops to its own row below the controls. Stats are
+    /// fixed-size so they never wrap into a vertical "0 / fil / es" stack.
     private var header: some View {
-        HStack(spacing: 10) {
-            Button { treeShown.toggle() } label: {
-                Image(systemName: treeShown ? "sidebar.left" : "sidebar.squares.left")
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                headerControls
+                Spacer(minLength: 8)
+                filterField.frame(width: 150)
+                headerActions
             }
-            .buttonStyle(.borderless)
-            .help(treeShown ? "Hide the file tree" : "Show the file tree")
-            let paths = Set(visibleFiles.map(\.path))
-            Button { collapsedFiles = paths } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
-                .buttonStyle(.borderless)
-                .help("Collapse all files")
-                .disabled(paths.isEmpty || collapsedFiles.isSuperset(of: paths))
-            Button { collapsedFiles = [] } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
-                .buttonStyle(.borderless)
-                .help("Expand all files")
-                .disabled(collapsedFiles.isEmpty)
-            if let files = diff?.files {
-                Text("\(files.count) file\(files.count == 1 ? "" : "s")")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                Text("+\(totals.add)").font(.system(size: 11)).foregroundStyle(.green)
-                Text("−\(totals.del)").font(.system(size: 11)).foregroundStyle(.red)
-                if diff?.truncatedFiles == true {
-                    Text("(list capped)").font(.system(size: 11)).foregroundStyle(.orange)
+            VStack(spacing: 6) {
+                HStack(spacing: 10) {
+                    headerControls
+                    Spacer(minLength: 8)
+                    headerActions
                 }
+                filterField.frame(maxWidth: .infinity)
             }
-            Spacer()
-            TextField("Filter files…", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11))
-                .frame(width: 150)
-            Button(model.isReviewing(sessionId) ? "Reviewing…" : "Review with Claude") {
-                model.runReview(sessionId)
-            }
-            .controlSize(.small)
-            .disabled(model.isReviewing(sessionId))
-            .help("Run Claude over this diff and overlay its findings")
-            Button("Refresh") { model.loadChanges(sessionId) }
-                .controlSize(.small)
-            GitActionsView(sessionId: sessionId)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    @ViewBuilder private var headerControls: some View {
+        Button { treeShown.toggle() } label: {
+            Image(systemName: treeShown ? "sidebar.left" : "sidebar.squares.left")
+        }
+        .buttonStyle(.borderless)
+        .help(treeShown ? "Hide the file tree" : "Show the file tree")
+        .clickCursor()
+        let paths = Set(visibleFiles.map(\.path))
+        Button { collapsedFiles = paths } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
+            .buttonStyle(.borderless)
+            .help("Collapse all files")
+            .disabled(paths.isEmpty || collapsedFiles.isSuperset(of: paths))
+            .clickCursor()
+        Button { collapsedFiles = [] } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+            .buttonStyle(.borderless)
+            .help("Expand all files")
+            .disabled(collapsedFiles.isEmpty)
+            .clickCursor()
+        if let files = diff?.files {
+            HStack(spacing: 6) {
+                Text("\(files.count) file\(files.count == 1 ? "" : "s")")
+                    .foregroundStyle(.secondary)
+                Text("+\(totals.add)").foregroundStyle(.green)
+                Text("−\(totals.del)").foregroundStyle(.red)
+                if diff?.truncatedFiles == true {
+                    Text("(list capped)").foregroundStyle(.orange)
+                }
+            }
+            .font(.system(size: 11))
+            .lineLimit(1)
+            .fixedSize()
+        }
+    }
+
+    private var filterField: some View {
+        TextField("Filter files…", text: $query)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11))
+    }
+
+    @ViewBuilder private var headerActions: some View {
+        Button(model.isReviewing(sessionId) ? "Reviewing…" : "Review with Claude") {
+            model.runReview(sessionId)
+        }
+        .controlSize(.small)
+        .disabled(model.isReviewing(sessionId))
+        .help("Run Claude over this diff and overlay its findings")
+        .clickCursor()
+        Button("Refresh") { model.loadChanges(sessionId) }
+            .controlSize(.small)
+            .clickCursor()
+        GitActionsView(sessionId: sessionId)
     }
 
     // MARK: - Review summary banner
@@ -248,7 +283,8 @@ struct ChangesPanel: View {
             if treeShown {
                 treePane
                     .frame(width: CGFloat(treeWidth))
-                ResizeHandle(width: $treeWidth, min: 160, max: 520)
+                // Tree is on the left; dragging right grows it (non-inverted).
+                DragResizeHandle(axis: .vertical, value: $treeWidth, min: 160, max: 520, invert: false)
             }
             diffPane
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -298,10 +334,12 @@ struct ChangesPanel: View {
                 .buttonStyle(.borderless)
                 .help("Collapse all folders")
                 .disabled(dirs.isEmpty || expanded.isEmpty)
+                .clickCursor()
             Button { expanded = dirs } label: { Image(systemName: "rectangle.expand.vertical") }
                 .buttonStyle(.borderless)
                 .help("Expand all folders")
                 .disabled(dirs.isEmpty || expanded == dirs)
+                .clickCursor()
         }
         .font(.system(size: 10))
         .padding(.horizontal, 8)
@@ -372,7 +410,7 @@ struct ChangesPanel: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 if showSubmit {
-                    Button("Cancel") { showSubmit = false }.controlSize(.small)
+                    Button("Cancel") { showSubmit = false }.controlSize(.small).clickCursor()
                 }
                 Button(showSubmit ? "Send to agent" : "Submit review →") {
                     if showSubmit {
@@ -385,6 +423,7 @@ struct ChangesPanel: View {
                 }
                 .controlSize(.small)
                 .keyboardShortcut(.defaultAction)
+                .clickCursor()
             }
         }
         .padding(10)
@@ -394,7 +433,7 @@ struct ChangesPanel: View {
 // MARK: - File card (header + hunks + inline comments)
 
 private struct FileCard: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let sessionId: String
     let file: DiffFile
     let comments: [DiffComment]
@@ -502,6 +541,7 @@ private struct FileCard: View {
             }
             .buttonStyle(.plain)
             .disabled(!collapsible)
+            .clickCursor()
             Spacer(minLength: 6)
             Text("+\(file.additions)").font(.system(size: 10)).foregroundStyle(.green)
             Text("−\(file.deletions)").font(.system(size: 10)).foregroundStyle(.red)
@@ -511,6 +551,7 @@ private struct FileCard: View {
             .buttonStyle(.borderless).foregroundStyle(.secondary)
             .disabled(file.status == .deleted)
             .help(file.status == .deleted ? "File was deleted" : "Open in your editor ($EDITOR)")
+            .clickCursor()
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(Color.secondary.opacity(0.08))
@@ -659,7 +700,8 @@ private struct FileCard: View {
                 }
                 .controlSize(.small)
                 .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
-                Button("Cancel") { composing = nil }.controlSize(.small)
+                .clickCursor()
+                Button("Cancel") { composing = nil }.controlSize(.small).clickCursor()
             }
         }
         .padding(8)
@@ -783,6 +825,7 @@ private struct CommentRow: View {
             Button { onDelete() } label: { Image(systemName: "xmark").font(.system(size: 9)) }
                 .buttonStyle(.borderless).foregroundStyle(.secondary)
                 .help("Delete comment")
+                .clickCursor()
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(Color.accentColor.opacity(0.08))
@@ -853,7 +896,7 @@ enum ReviewSeverityStyle {
 /// Commit / Push / PR controls for the changes panel header — the SwiftUI port of
 /// the web `GitActions`. Operates on the session's cwd in-process via AppModel.
 private struct GitActionsView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let sessionId: String
 
     @State private var showCommit = false
@@ -885,12 +928,14 @@ private struct GitActionsView: View {
                 .controlSize(.small)
                 .disabled(!dirty)
                 .popover(isPresented: $showCommit, arrowEdge: .bottom) { commitForm }
+                .clickCursor()
 
                 Button(state?.ahead ?? 0 > 0 ? "Push \(state!.ahead)" : "Push") {
                     Task { busy = true; await model.push(sessionId); busy = false }
                 }
                 .controlSize(.small)
                 .disabled(!canPush || busy)
+                .clickCursor()
 
                 Button("PR") {
                     prefillBranch(); showPr.toggle(); showCommit = false
@@ -898,6 +943,7 @@ private struct GitActionsView: View {
                 .controlSize(.small)
                 .disabled(!(state?.remote ?? false) || (state?.detached ?? false))
                 .popover(isPresented: $showPr, arrowEdge: .bottom) { prForm }
+                .clickCursor()
             }
         }
     }
@@ -924,6 +970,7 @@ private struct GitActionsView: View {
                     }
                 }
                 .controlSize(.small).disabled(busy)
+                .clickCursor()
                 Spacer()
                 Button("Commit all") {
                     Task {
@@ -937,6 +984,7 @@ private struct GitActionsView: View {
                 .controlSize(.small)
                 .keyboardShortcut(.defaultAction)
                 .disabled(busy || message.trimmingCharacters(in: .whitespaces).isEmpty)
+                .clickCursor()
             }
             Text("Stages every change (git add -A) then commits.")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -951,7 +999,7 @@ private struct GitActionsView: View {
                     .font(.system(size: 12))
                 Link(r.url, destination: URL(string: r.url) ?? URL(string: "https://github.com")!)
                     .font(.system(size: 11)).lineLimit(1)
-                Button("Done") { prResult = nil; showPr = false }.controlSize(.small)
+                Button("Done") { prResult = nil; showPr = false }.controlSize(.small).clickCursor()
             } else {
                 TextField("PR title", text: $prTitle)
                     .textFieldStyle(.roundedBorder).font(.system(size: 12))
@@ -973,6 +1021,7 @@ private struct GitActionsView: View {
                     .controlSize(.small)
                     .keyboardShortcut(.defaultAction)
                     .disabled(busy || prTitle.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .clickCursor()
                 }
                 Text("Pushes the branch first, then opens the PR.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -1023,6 +1072,7 @@ private struct FileTreeRows: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .clickCursor()
     }
 
     private func fileRow(_ file: DiffFile) -> some View {
@@ -1052,6 +1102,7 @@ private struct FileTreeRows: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .clickCursor()
     }
 
     private var indent: CGFloat { 8 + CGFloat(depth) * 14 }
@@ -1072,32 +1123,6 @@ private struct FileTreeRows: View {
         case .deleted: return .red
         case .renamed: return .blue
         }
-    }
-}
-
-/// A thin draggable vertical divider that resizes the pane to its left by writing
-/// `width` (clamped to [min, max]). Shows a resize cursor on hover.
-private struct ResizeHandle: View {
-    @Binding var width: Double
-    let min: Double
-    let max: Double
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.secondary.opacity(0.18))
-            .frame(width: 1)
-            .overlay(
-                Rectangle().fill(Color.clear).frame(width: 8)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                    }
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                width = Swift.min(max, Swift.max(min, width + value.translation.width))
-                            })
-            )
     }
 }
 

@@ -1,5 +1,5 @@
 import Foundation
-import Combine
+import Observation
 import JuancodeCore
 import JuancodeServices
 import JuancodePersistence
@@ -9,21 +9,25 @@ import JuancodeServer
 /// local UI is an in-process subscriber to the same `SessionRegistry` the
 /// embedded server drives — there is no WS hop for the local view.
 @MainActor
-final class AppModel: ObservableObject {
+@Observable
+final class AppModel {
     let appState: AppState
 
-    @Published var sessions: [SessionMeta] = []
-    @Published var activities: [String: SessionActivity] = [:]
-    @Published var selection: String?
-    @Published var showingNewSession = false
-    @Published var errorMessage: String?
+    var sessions: [SessionMeta] = []
+    var activities: [String: SessionActivity] = [:]
+    var selection: String?
+    var showingNewSession = false
+    /// Top command-bar sheets (juancode-6sw / q6q / 38z).
+    var showingWorktrees = false
+    var showingTrackedPrs = false
+    var errorMessage: String?
     /// Sessions whose accept-all flag is mid-flip (pty being resume-restarted), so
     /// the UI can disable the control until the new pty is up.
-    @Published var flippingPermissions: Set<String> = []
+    var flippingPermissions: Set<String> = []
 
     /// Open-PR lists per folder cwd, loaded lazily by `FolderHeader` and refreshed
     /// in the background. Mirrors the web's per-folder `useQuery(["prs", cwd])`.
-    @Published var prsByCwd: [String: PrListResult] = [:]
+    var prsByCwd: [String: PrListResult] = [:]
     /// cwds with a PR fetch in flight, so a refresh doesn't stampede.
     private var prsLoading: Set<String> = []
 
@@ -36,6 +40,7 @@ final class AppModel: ObservableObject {
         }
         for s in appState.registry.all() { watch(s) }
         refresh()
+        restoreTracked()
     }
 
     /// Persisted sessions (incl. exited), with live registry meta preferred for
@@ -56,7 +61,7 @@ final class AppModel: ObservableObject {
     /// → idle edge for that session, then cleared. Keyed by id so switching sessions
     /// preserves each session's pending draft. Mirrors the web SessionView's
     /// client-side `queued` buffer + idle-edge detection.
-    @Published var queuedDrafts: [String: String] = [:]
+    var queuedDrafts: [String: String] = [:]
 
     /// The pending follow-up for `id`, if any.
     func queuedDraft(_ id: String) -> String? { queuedDrafts[id] }
@@ -117,7 +122,8 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
-                isolateWorktree: Bool, initialInput: String? = nil, select: Bool = true) async -> Session? {
+                isolateWorktree: Bool, initialInput: String? = nil, select: Bool = true,
+                cols: Int? = nil, rows: Int? = nil) async -> Session? {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
@@ -131,9 +137,14 @@ final class AppModel: ObservableObject {
             let state = appState
             let cwdToUse = workCwd
             let wt = worktreePath
+            // Spawn at the given size, else the last on-screen terminal size, so the
+            // CLI's alt-screen boots matching the view it'll render in (fixes "fresh
+            // session opens short" / the Oracle dock garble). Oracle passes its dock
+            // size explicitly since the dock is narrower than the main window.
+            let grid: (cols: Int, rows: Int) = (cols != nil && rows != nil) ? (cols!, rows!) : TerminalGrid.spawn
             let s = try await Task.detached(priority: .userInitiated) {
                 try state.registry.create(
-                    provider: provider, cwd: cwdToUse, cols: 80, rows: 24,
+                    provider: provider, cwd: cwdToUse, cols: grid.cols, rows: grid.rows,
                     opts: SpawnOptions(skipPermissions: skipPermissions), worktreePath: wt)
             }.value
             // Seed the session with an initial prompt once its TUI is up — the same
@@ -152,7 +163,82 @@ final class AppModel: ObservableObject {
     /// NewSessionView sheet. Mirrors the web sidebar's per-folder "+" agent menu
     /// (accept-all off, no worktree). Selects the new session on success.
     func createInFolder(provider: ProviderId, cwd: String) {
-        Task { await create(provider: provider, cwd: cwd, skipPermissions: false, isolateWorktree: false) }
+        Task { await create(provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: false) }
+    }
+
+    // MARK: - External (terminal) sessions
+
+    /// claude/codex conversations found on disk that juancode didn't create —
+    /// surfaced in the sidebar behind the "Show terminal sessions" toggle as
+    /// synthesized exited metas (id == CLI session id) you can resume by selecting.
+    var externalSessions: [SessionMeta] = []
+    /// Whether more terminal sessions exist beyond the loaded window (drives "Load more").
+    var externalHasMore = false
+    /// Ids in `externalSessions`, for O(1) "is this row external?" checks.
+    @ObservationIgnored private var externalIds: Set<String> = []
+    @ObservationIgnored private var externalLoading = false
+    /// How many terminal sessions are currently loaded; grows by `externalPageSize`
+    /// on "Load more" so we never read every transcript at once.
+    @ObservationIgnored private var externalLimit = 0
+    private let externalPageSize = 10
+
+    /// True if `id` is a not-yet-imported terminal session (vs. one of ours).
+    func isExternal(_ id: String) -> Bool { externalIds.contains(id) }
+
+    /// (Re)load the most recent terminal sessions, deduped against the sessions
+    /// juancode already owns. Starts at one page; resets the window each call.
+    func loadExternalSessions() {
+        externalLimit = externalPageSize
+        fetchExternal()
+    }
+
+    /// Grow the window by one page (the "Load more" action).
+    func loadMoreExternalSessions() {
+        externalLimit += externalPageSize
+        fetchExternal()
+    }
+
+    private func fetchExternal() {
+        guard !externalLoading else { return }
+        externalLoading = true
+        let used = appState.store.usedCliSessionIds()
+        let limit = externalLimit
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                await discoverExternalSessions(limit: limit, excluding: used)
+            }.value
+            externalSessions = result.sessions.map { ext in
+                SessionMeta(id: ext.id, provider: ext.provider, cwd: ext.cwd, title: ext.title,
+                            status: .exited, exitCode: nil, createdAt: ext.lastActiveMs,
+                            updatedAt: ext.lastActiveMs, cliSessionId: ext.id,
+                            skipPermissions: true, worktreePath: nil, usage: nil)
+            }
+            externalIds = Set(externalSessions.map(\.id))
+            externalHasMore = result.hasMore
+            externalLoading = false
+        }
+    }
+
+    /// Import a discovered terminal session: register it as a real juancode session
+    /// (fresh internal id, same CLI conversation) and resume its CLI conversation.
+    func importExternalSession(_ id: String) {
+        guard let ext = externalSessions.first(where: { $0.id == id }) else { return }
+        var meta = ext
+        meta.id = UUID().uuidString // our own key; `cliSessionId` still points at the conversation
+        appState.store.insert(meta)
+        externalSessions.removeAll { $0.id == id }
+        externalIds.remove(id)
+        refresh()
+        selection = meta.id
+        Task {
+            do {
+                let grid = TerminalGrid.spawn
+                _ = try appState.registry.resume(meta, cols: grid.cols, rows: grid.rows)
+                refresh()
+            } catch {
+                errorMessage = "Couldn't resume terminal session: \(error)"
+            }
+        }
     }
 
     // MARK: - Open pull requests (per-folder PR popover)
@@ -179,7 +265,7 @@ final class AppModel: ObservableObject {
     /// Always uses the folder's cwd (not a worktree) so the branch context lines up.
     func workOnPr(_ pr: PullRequest, cwd: String) {
         Task {
-            await create(provider: .claude, cwd: cwd, skipPermissions: false,
+            await create(provider: .claude, cwd: cwd, skipPermissions: true,
                          isolateWorktree: false, initialInput: prPrompt(pr))
         }
     }
@@ -187,11 +273,11 @@ final class AppModel: ObservableObject {
     // MARK: - Full-text transcript search (juancode-wx9)
 
     /// The current search query (bound to the SearchPanel text field).
-    @Published var searchQuery = ""
+    var searchQuery = ""
     /// Hits for the most recently completed search, in rank order.
-    @Published var searchResults: [SearchHit] = []
+    var searchResults: [SearchHit] = []
     /// True while a search is in flight (for a "Searching…" affordance).
-    @Published var searching = false
+    var searching = false
     /// Monotonic token so a slow earlier search can't clobber a newer one.
     private var searchToken = 0
 
@@ -230,7 +316,7 @@ final class AppModel: ObservableObject {
     /// bd issue listings per folder cwd, loaded lazily by `FolderHeader` and
     /// refreshed in the background. Mirrors `prsByCwd`. `available: false` (no
     /// tracker / bd missing) keeps the popover trigger hidden.
-    @Published var beadsByCwd: [String: BeadsResult] = [:]
+    var beadsByCwd: [String: BeadsResult] = [:]
     /// cwds with an issue fetch in flight, so a refresh doesn't stampede.
     private var beadsLoading: Set<String> = []
 
@@ -270,7 +356,7 @@ final class AppModel: ObservableObject {
                 session.write("\(prompt)\r")
             } else {
                 // No live session for this folder — start one seeded with the prompt.
-                await create(provider: .claude, cwd: cwd, skipPermissions: false,
+                await create(provider: .claude, cwd: cwd, skipPermissions: true,
                              isolateWorktree: false, initialInput: prompt)
             }
         }
@@ -290,7 +376,7 @@ final class AppModel: ObservableObject {
 
     /// PRs under continuous watch, keyed by `TrackedPr.key(cwd:number:)`. The poll
     /// loop diffs each one's `gh` activity and feeds fixes into its agent session.
-    @Published var tracked: [String: TrackedPr] = [:]
+    var tracked: [String: TrackedPr] = [:]
     /// How often the poll loop revisits every tracked PR.
     private let trackPollInterval: Duration = .seconds(20)
     private var trackLoop: Task<Void, Never>?
@@ -298,6 +384,19 @@ final class AppModel: ObservableObject {
     /// Look up a tracked PR by folder + number (for the "Track / Tracking" toggle).
     func trackedPr(cwd: String, number: Int) -> TrackedPr? {
         tracked[TrackedPr.key(cwd: cwd, number: number)]
+    }
+
+    /// The tracked PR whose agent session is `id`, if any — drives the PR label on a
+    /// session row (juancode-kxy).
+    func trackedPr(forSession id: String) -> TrackedPr? {
+        tracked.values.first { $0.sessionId == id }
+    }
+
+    /// All tracked PRs, most recently polled first, for the global panel (juancode-38z).
+    var trackedList: [TrackedPr] {
+        tracked.values.sorted {
+            ($0.lastPolledAt ?? 0, $0.number) > ($1.lastPolledAt ?? 0, $1.number)
+        }
     }
 
     /// Start tracking a PR: spawn a dedicated Claude session seeded with the PR's
@@ -309,11 +408,12 @@ final class AppModel: ObservableObject {
         Task {
             let seed = trackSeedPrompt(number: pr.number, title: pr.title,
                                        branch: pr.branch, url: pr.url)
-            guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: false,
+            guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
                                              isolateWorktree: false, initialInput: seed) else { return }
             tracked[key] = TrackedPr(
                 number: pr.number, title: pr.title, branch: pr.branch, url: pr.url,
                 cwd: cwd, sessionId: session.id)
+            persistTracked()
             startTrackLoop()
         }
     }
@@ -322,12 +422,37 @@ final class AppModel: ObservableObject {
     /// it); just drops it from the watch list. Stops the loop when none remain.
     func untrackPr(_ id: String) {
         tracked[id] = nil
+        persistTracked()
         if tracked.isEmpty { trackLoop?.cancel(); trackLoop = nil }
     }
 
     /// Dismiss a surfaced decision once the user has dealt with it.
     func resolveNotification(prId: String, notificationId: String) {
         tracked[prId]?.notifications.removeAll { $0.id == notificationId }
+        persistTracked()
+    }
+
+    // Tracked PRs survive an app restart (juancode-38z) via UserDefaults — the watch
+    // list + diff baseline (seen comments/reviews, last CI status) are restored, so
+    // the loop doesn't replay history. The driving session may be exited after a
+    // restart; auto-fix prompts resume injecting once it's reactivated, while the
+    // badge/state keep working in the meantime.
+    private static let trackedDefaultsKey = "juancode.trackedPrs.v1"
+
+    private func persistTracked() {
+        let list = Array(tracked.values)
+        if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: Self.trackedDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.trackedDefaultsKey)
+        }
+    }
+
+    private func restoreTracked() {
+        guard let data = UserDefaults.standard.data(forKey: Self.trackedDefaultsKey),
+              let list = try? JSONDecoder().decode([TrackedPr].self, from: data) else { return }
+        for pr in list { tracked[pr.id] = pr }
+        if !tracked.isEmpty { startTrackLoop() }
     }
 
     private func startTrackLoop() {
@@ -374,6 +499,7 @@ final class AppModel: ObservableObject {
             }
             tracked[key] = entry
         }
+        persistTracked()
     }
 
     /// Flip "accept all" (skip permission prompts) on a live session. There's no
@@ -416,7 +542,8 @@ final class AppModel: ObservableObject {
             let prior = appState.store.getScrollback(id) ?? []
             let seed: [UInt8] = prior.isEmpty
                 ? [] : prior + Array("\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n".utf8)
-            _ = try appState.registry.resume(meta, cols: 80, rows: 24, priorScrollback: seed)
+            let grid = TerminalGrid.spawn
+            _ = try appState.registry.resume(meta, cols: grid.cols, rows: grid.rows, priorScrollback: seed)
             refresh()
         } catch {
             errorMessage = "Failed to resume: \(error)"
@@ -453,26 +580,26 @@ final class AppModel: ObservableObject {
 
     /// Per-session working-tree diff cache, loaded lazily by the ChangesPanel and
     /// refreshed on demand. Mirrors the web's per-session `useQuery(["diff", …])`.
-    @Published var diffBySession: [String: DiffResult] = [:]
+    var diffBySession: [String: DiffResult] = [:]
     /// Per-session git state (branch / ahead / dirty / remote) backing the git CTAs.
-    @Published var gitStateBySession: [String: GitState] = [:]
+    var gitStateBySession: [String: GitState] = [:]
     /// Per-session inline review comments. Held in-memory (in-process, no server
     /// round-trip) — they're a staging area pasted into the agent on "submit".
-    @Published var commentsBySession: [String: [DiffComment]] = [:]
+    var commentsBySession: [String: [DiffComment]] = [:]
     /// Sessions whose diff is currently loading, so the panel can show a spinner.
-    @Published var diffLoading: Set<String> = []
+    var diffLoading: Set<String> = []
     /// A transient git-action status line per session (commit/push result or error).
-    @Published var gitNoteBySession: [String: GitNote] = [:]
+    var gitNoteBySession: [String: GitNote] = [:]
 
     private var diffInFlight: Set<String> = []
 
     /// Per-session 'Review with Claude' result (juancode-7ha). The last AI review
     /// pass over the working-tree diff, cached so findings stay overlaid until the
     /// next run — the native analogue of the web's `useQuery(["review", …])`.
-    @Published var reviewBySession: [String: ReviewResult] = [:]
+    var reviewBySession: [String: ReviewResult] = [:]
     /// Sessions whose review pass is currently running, so the panel can show a
     /// "Reviewing…" spinner and disable the button.
-    @Published var reviewRunning: Set<String> = []
+    var reviewRunning: Set<String> = []
 
     struct GitNote: Equatable { var ok: Bool; var text: String }
 
@@ -537,7 +664,7 @@ final class AppModel: ObservableObject {
     /// pure tab/pane layout lives in `TerminalPanelModel`; the live shell ptys are
     /// held alongside it, keyed by pane id. (Cross-session-switch persistence
     /// niceties are tracked separately in juancode-iwi.)
-    @Published var terminalPanels: [String: TerminalPanelModel] = [:]
+    var terminalPanels: [String: TerminalPanelModel] = [:]
     /// Live shell ptys for every open pane, keyed by pane id. Shared across all
     /// folders; entries are removed + killed when their pane closes.
     private var shellPtys: [TerminalPaneID: EphemeralPty] = [:]
@@ -731,10 +858,10 @@ final class AppModel: ObservableObject {
     /// Per-provider auth + MCP-server health, loaded in-process via `getAllStatus`
     /// (which shells into the real `claude`/`codex` CLIs). The native analogue of
     /// the web `useQuery(["status"])`. `nil` until first loaded.
-    @Published var providerStatus: [ProviderStatus]?
+    var providerStatus: [ProviderStatus]?
     /// True while a status check is in flight (the CLIs health-check every server,
     /// so this can take a few seconds). Backs the panel's "checking…" affordance.
-    @Published var statusLoading = false
+    var statusLoading = false
 
     /// Load (or refresh) provider + MCP status off the main actor. Coalesces
     /// concurrent calls. Mirrors `loadPrs`/`loadBeads`. `getAllStatus` never
@@ -746,6 +873,49 @@ final class AppModel: ObservableObject {
             let result = await Task.detached(priority: .utility) { await getAllStatus() }.value
             providerStatus = result
             statusLoading = false
+        }
+    }
+
+    // MARK: - Worktree cleanup (juancode-q6q)
+
+    /// Linked git worktrees discovered across the repos currently in play. The
+    /// "main" worktree of each repo is included (flagged, not removable).
+    var worktrees: [Worktree] = []
+    var worktreesLoading = false
+
+    /// Scan every distinct session cwd (and any session-owned worktree path) for the
+    /// repo's worktrees, deduped by path. Off the main actor (shells into git).
+    func loadWorktrees() {
+        guard !worktreesLoading else { return }
+        worktreesLoading = true
+        let cwds = Set(sessions.map(\.cwd) + sessions.compactMap(\.worktreePath))
+        Task {
+            var seen = Set<String>()
+            var out: [Worktree] = []
+            for cwd in cwds {
+                let trees = await Task.detached(priority: .utility) { await listWorktrees(cwd) }.value
+                for t in trees where seen.insert(t.path).inserted { out.append(t) }
+            }
+            worktrees = out.sorted { $0.path.localizedCompare($1.path) == .orderedAscending }
+            worktreesLoading = false
+        }
+    }
+
+    /// True if a live session is rooted in `path` — a worktree that's still in use
+    /// (removing it would pull the rug from under a running agent).
+    func worktreeInUse(_ path: String) -> Bool {
+        appState.registry.all().contains { $0.meta.cwd == path || $0.meta.worktreePath == path }
+    }
+
+    /// Remove a worktree (and its directory) and refresh the list. Off the main actor.
+    func removeWorktreeAt(_ path: String) {
+        Task {
+            do {
+                try await removeWorktree(path)
+            } catch {
+                errorMessage = "Couldn't remove worktree: \(gitErrorText(error))"
+            }
+            loadWorktrees()
         }
     }
 

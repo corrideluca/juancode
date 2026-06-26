@@ -87,8 +87,30 @@ public final class PtyProcess: @unchecked Sendable {
 
         self.masterFd = master
         self.pid = childPid
+        Self.disableSuspendChar(master)
         startReading()
         startExitWatch()
+    }
+
+    /// Disable the terminal's SUSP control char (Ctrl-Z) on the pty's line
+    /// discipline, so Ctrl-Z can never raise `SIGTSTP` and suspend the agent.
+    ///
+    /// We are a terminal emulator with no job-control shell behind the pty — the CLI
+    /// (claude/codex) is the foreground process directly. A `SIGTSTP` therefore just
+    /// stops it with nothing to resume it, freezing the session ("Ctrl-Z borks it").
+    /// During normal TUI operation the agent runs in raw mode (`ISIG` off) where
+    /// Ctrl-Z is already an inert byte; disabling SUSP here also covers the
+    /// cooked-mode windows (boot, tool shell-outs) where `ISIG` is on. The agent
+    /// saves/restores this termios, so the disable sticks across its own mode flips.
+    private static func disableSuspendChar(_ fd: Int32) {
+        var tio = termios()
+        guard tcgetattr(fd, &tio) == 0 else { return }
+        withUnsafeMutablePointer(to: &tio.c_cc) {
+            $0.withMemoryRebound(to: cc_t.self, capacity: Int(NCCS)) { cc in
+                cc[Int(VSUSP)] = 0xff  // _POSIX_VDISABLE — disable Ctrl-Z
+            }
+        }
+        _ = tcsetattr(fd, TCSANOW, &tio)
     }
 
     private func startReading() {
@@ -161,10 +183,19 @@ public final class PtyProcess: @unchecked Sendable {
     }
 
     /// Propagate a view resize into the pty so the CLI re-lays out its TUI.
+    ///
+    /// `TIOCSWINSZ` is supposed to raise `SIGWINCH` on the slave's foreground
+    /// process group, but in practice that delivery isn't reliable here (the CLI
+    /// then never re-lays-out and stays stuck at its boot-time size on every
+    /// resize). The child is its own session/group leader after `forkpty`
+    /// (`login_tty` → `setsid`), so we send `SIGWINCH` to its group explicitly —
+    /// idempotent with whatever the kernel does, and what actually makes claude/codex
+    /// repaint when you drag the window or a panel.
     public func resize(cols: Int, rows: Int) {
         guard cols > 0, rows > 0 else { return }
         var ws = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
         _ = ioctl(masterFd, TIOCSWINSZ, &ws)
+        _ = killpg(pid, SIGWINCH)
     }
 
     /// Hang up: send a graceful SIGTERM to the group and close the master so the

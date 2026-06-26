@@ -2,102 +2,79 @@ import SwiftUI
 import JuancodeCore
 import JuancodeServices
 
-/// The global "Oracle" helper docked at the bottom-right (juancode-wjg). Collapsed
-/// it's a floating pill with the open-item count; expanded it's a panel with two
-/// tabs — a global bd issue view (dispatch into a project / ask Oracle) and the
-/// Oracle agent's live chat terminal. It overlays the whole window, independent of
-/// which session/workdir is focused.
+/// The global "Oracle" helper (juancode-wjg / juancode-6sw): a right-docked,
+/// full-height side panel with two tabs — a global bd issue view (dispatch into a
+/// project / ask Oracle) and the Oracle agent's live chat terminal. Opened from the
+/// top command bar or ⌃Space; it slides in over the right edge with a minimum width
+/// so the agent CLI always boots into a usable, stable grid (a fixed drawer avoids
+/// the live-reflow fragility of a free-floating resizable panel).
 struct OracleDock: View {
-    @EnvironmentObject var oracle: OracleModel
-    /// Persisted dock size. Defaults wide enough that the agent's full-screen TUI
-    /// gets ~80 columns and renders cleanly (a narrow dock makes claude/codex draw
-    /// 80-col lines into too few columns → overlapping garbage). Resizable via the
-    /// top-left grip.
-    @AppStorage("oracle.dock.width") private var dockWidth: Double = 680
-    @AppStorage("oracle.dock.height") private var dockHeight: Double = 620
+    @Environment(OracleModel.self) private var oracle
+    /// Persisted panel width (drag the left edge). Floored so the agent CLI never
+    /// renders into too few columns (which garbles its TUI).
+    @AppStorage("oracle.panel.width") private var panelWidth: Double = 600
+    private static let minWidth: Double = 460
+    private static let maxWidth: Double = 1100
 
     var body: some View {
-        Group {
+        ZStack(alignment: .trailing) {
             if oracle.expanded {
+                Color.black.opacity(0.28)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { oracle.expanded = false }
+                    .transition(.opacity)
                 panel
-            } else {
-                collapsedButton
+                    .transition(.move(edge: .trailing))
             }
         }
-        .padding(16)
+        .animation(.easeOut(duration: 0.16), value: oracle.expanded)
         .onAppear { oracle.bootstrap() }
     }
 
-    private var collapsedButton: some View {
-        Button { oracle.expanded = true } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                Text("Oracle").font(.system(size: 12, weight: .medium))
-                if openCount > 0 {
-                    Text("\(openCount)")
-                        .font(.system(size: 10, weight: .semibold))
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Color.white.opacity(0.22))
-                        .clipShape(Capsule())
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(Color.accentColor)
-            .foregroundStyle(.white)
-            .clipShape(Capsule())
-            .shadow(radius: 6, y: 2)
-        }
-        .buttonStyle(.plain)
-        .help("Open Oracle — global tracker + orchestration")
-    }
-
     private var panel: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            Picker("", selection: $oracle.tab) {
-                ForEach(OracleModel.OracleTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        @Bindable var oracle = oracle
+        let w = min(Self.maxWidth, max(Self.minWidth, panelWidth))
+        return HStack(spacing: 0) {
+            // Drag the left edge to widen/narrow the drawer (drag left grows it).
+            DragResizeHandle(axis: .vertical, value: $panelWidth,
+                             min: Self.minWidth, max: Self.maxWidth, invert: true)
+            VStack(spacing: 0) {
+                header
+                Divider()
+                Picker("", selection: $oracle.tab) {
+                    ForEach(OracleModel.OracleTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                Divider()
+                content.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 8).padding(.vertical, 6)
-            Divider()
-            content
+            .frame(width: w)
         }
-        .frame(width: dockWidth, height: dockHeight)
+        .frame(maxHeight: .infinity)
         .background(Color(white: 0.07))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.12), lineWidth: 1))
-        // Drag the top-left corner to resize (the dock is pinned bottom-right, so
-        // growing reaches up and to the left).
-        .overlay(alignment: .topLeading) { resizeGrip }
-        .shadow(radius: 16, y: 4)
-    }
-
-    private var resizeGrip: some View {
-        Image(systemName: "arrow.up.left.and.arrow.down.right")
-            .font(.system(size: 9))
-            .foregroundStyle(.secondary)
-            .padding(5)
-            .contentShape(Rectangle())
-            .onHover { $0 ? NSCursor.crosshair.push() : NSCursor.pop() }
-            .gesture(
-                DragGesture()
-                    .onChanged { v in
-                        dockWidth = min(1200, max(420, dockWidth - v.translation.width))
-                        dockHeight = min(1000, max(320, dockHeight - v.translation.height))
-                    })
-            .help("Drag to resize")
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1)
+        }
+        .shadow(radius: 24, x: -6)
+        // Esc closes it (the close button mirrors this).
+        .background(
+            Button("") { oracle.expanded = false }
+                .keyboardShortcut(.cancelAction).opacity(0).frame(width: 0, height: 0)
+        )
     }
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "sparkles").foregroundStyle(.tint)
+            Image(systemName: "sparkles").foregroundStyle(.tint).padding(.leading, 12)
             Text("Oracle").font(.system(size: 13, weight: .semibold))
             Spacer()
-            Button { oracle.expanded = false } label: { Image(systemName: "chevron.down") }
+            Button { oracle.expanded = false } label: { Image(systemName: "chevron.right") }
                 .buttonStyle(.borderless)
-                .help("Collapse")
+                .help("Close (⌃Space)")
+                .clickCursor()
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
@@ -115,11 +92,6 @@ struct OracleDock: View {
         }
     }
 
-    private var openCount: Int {
-        guard let r = oracle.globalBeads, r.available else { return 0 }
-        return r.issues.filter { $0.status != "closed" }.count
-    }
-
     private func centered(_ text: String) -> some View {
         VStack {
             Spacer()
@@ -135,7 +107,7 @@ struct OracleDock: View {
 /// item offers Dispatch… (spawn an agent in a project) and Ask Oracle (hand the
 /// item to the agent to reason about).
 private struct OracleIssuesView: View {
-    @EnvironmentObject var oracle: OracleModel
+    @Environment(OracleModel.self) private var oracle
     @State private var query = ""
 
     private var result: BeadsResult? { oracle.globalBeads }
@@ -157,6 +129,7 @@ private struct OracleIssuesView: View {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11))
                 }
                 .buttonStyle(.borderless).help("Refresh")
+                .clickCursor()
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             Divider()
@@ -206,7 +179,7 @@ private struct OracleIssuesView: View {
 
 /// One global item: status dot, id/priority, title, and the dispatch / ask actions.
 private struct OracleIssueRow: View {
-    @EnvironmentObject var oracle: OracleModel
+    @Environment(OracleModel.self) private var oracle
     let issue: BeadsIssue
     @State private var showingDispatch = false
 
@@ -230,11 +203,13 @@ private struct OracleIssueRow: View {
                         .popover(isPresented: $showingDispatch, arrowEdge: .bottom) {
                             OracleDispatchPicker(issue: issue) { showingDispatch = false }
                         }
+                        .clickCursor()
                     Button("Ask Oracle") {
                         oracle.ask(issuePrompt(id: issue.id, title: issue.title))
                     }
                     .buttonStyle(.borderless).font(.system(size: 11))
                     .help("Hand this item to the Oracle agent to reason about / orchestrate")
+                    .clickCursor()
                     Spacer()
                 }
             }
@@ -259,7 +234,7 @@ private struct OracleIssueRow: View {
 /// Pick the target project + provider + worktree for dispatching a global item.
 /// Project choices are the work dirs already in play, plus a free-text path.
 private struct OracleDispatchPicker: View {
-    @EnvironmentObject var oracle: OracleModel
+    @Environment(OracleModel.self) private var oracle
     let issue: BeadsIssue
     let dismiss: () -> Void
 
@@ -289,7 +264,7 @@ private struct OracleDispatchPicker: View {
                 .toggleStyle(.checkbox).font(.system(size: 11))
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.controlSize(.small)
+                Button("Cancel") { dismiss() }.controlSize(.small).clickCursor()
                 Button("Dispatch") {
                     oracle.dispatch(
                         project: project.trimmingCharacters(in: .whitespaces),
@@ -300,6 +275,7 @@ private struct OracleDispatchPicker: View {
                 .controlSize(.small)
                 .keyboardShortcut(.defaultAction)
                 .disabled(project.trimmingCharacters(in: .whitespaces).isEmpty)
+                .clickCursor()
             }
         }
         .padding(12)
@@ -309,17 +285,21 @@ private struct OracleDispatchPicker: View {
 
 /// The Oracle agent's live chat terminal, or a starting affordance.
 private struct OracleChatView: View {
-    @EnvironmentObject var oracle: OracleModel
+    @Environment(OracleModel.self) private var oracle
 
     var body: some View {
         if let session = oracle.session {
-            SwiftTermLive(session: session)
+            // Same pattern as the main session pane (which resizes correctly): a
+            // plain fill. `sizeThatFits` on SwiftTermLive makes the bridged view take
+            // the proposed size.
+            SwiftTermLive(session: session, remembersSize: false)
                 .id(ObjectIdentifier(session))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 8) {
                 Spacer()
                 Text("Oracle agent isn't running.").font(.system(size: 12)).foregroundStyle(.secondary)
-                Button("Start Oracle") { oracle.bootstrap() }.controlSize(.small)
+                Button("Start Oracle") { oracle.startAgent() }.controlSize(.small).clickCursor()
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

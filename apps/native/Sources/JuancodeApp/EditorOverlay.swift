@@ -34,6 +34,7 @@ struct EditorOverlay: View {
                 Button("Force close", action: onForceClose)
                     .controlSize(.small)
                     .help("Force close (discards an unsaved buffer)")
+                    .clickCursor()
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             Divider()
@@ -55,7 +56,7 @@ struct SwiftTermEphemeral: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
 
-    func makeNSView(context: Context) -> TerminalView {
+    func makeNSView(context: Context) -> TerminalHostView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         tv.terminalDelegate = context.coordinator
         context.coordinator.attach(to: tv)
@@ -63,12 +64,19 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         let t = tv.getTerminal()
         pty.resize(cols: t.cols, rows: t.rows)
         DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
-        return tv
+        let host = TerminalHostView(terminal: tv)
+        host.onDrop = { [pty] text in pty.write(Array(text.utf8)) }
+        return host
     }
 
-    func updateNSView(_ nsView: TerminalView, context: Context) {}
+    func updateNSView(_ nsView: TerminalHostView, context: Context) {}
 
-    static func dismantleNSView(_ nsView: TerminalView, coordinator: Coordinator) {
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TerminalHostView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? nsView.frame.width,
+               height: proposal.height ?? nsView.frame.height)
+    }
+
+    static func dismantleNSView(_ nsView: TerminalHostView, coordinator: Coordinator) {
         coordinator.detach()
     }
 
@@ -81,6 +89,8 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         private weak var view: TerminalView?
         private var cancelOutput: (() -> Void)?
         private var cancelExit: (() -> Void)?
+        private var wheelMonitor: Any?
+        private var resizeWork: DispatchWorkItem?
 
         init(pty: EphemeralPty, onExit: @escaping @Sendable () -> Void) {
             self.pty = pty
@@ -89,6 +99,7 @@ struct SwiftTermEphemeral: NSViewRepresentable {
 
         func attach(to tv: TerminalView) {
             view = tv
+            wheelMonitor = installWheelForwarding(on: tv)
             cancelOutput = pty.onOutput { [weak tv] bytes in
                 DispatchQueue.main.async { tv?.feed(byteArray: bytes[...]) }
             }
@@ -99,6 +110,8 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         }
 
         func detach() {
+            if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
+            resizeWork?.cancel(); resizeWork = nil
             cancelOutput?(); cancelOutput = nil
             cancelExit?(); cancelExit = nil
         }
@@ -110,7 +123,11 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            pty.resize(cols: newCols, rows: newRows)
+            // Coalesce resize bursts into one SIGWINCH (see SwiftTermLive).
+            resizeWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.pty.resize(cols: newCols, rows: newRows) }
+            resizeWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(90), execute: work)
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}

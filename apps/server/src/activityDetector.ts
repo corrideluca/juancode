@@ -59,12 +59,20 @@ export class ActivityDetector {
 
   /** Feed a chunk of raw pty output. */
   feed(data: string): void {
+    // Cheap gate before the expensive ANSI-strip regex (runs on every pty chunk of
+    // every live session). The working-line regex requires the literal word
+    // "interrupt", and the stripped `tail` is only consulted at settle time, which
+    // only follows a busy period — so an idle session that can't be starting a turn
+    // has nothing to do.
+    const mightStart = data.toLowerCase().includes("interrupt");
+    if (this.state !== "busy" && !mightStart) return;
+
     const stripped = data.replace(ANSI_RE, "");
     if (stripped) this.tail = (this.tail + stripped).slice(-TAIL_LIMIT);
     // The phrase is matched against the current frame only (not the historical
     // tail) so it genuinely marks the *start* of a turn — a stale occurrence
     // can't make typing echoes re-trigger busy later.
-    if (WORKING_RE.test(stripped)) {
+    if (mightStart && WORKING_RE.test(stripped)) {
       this.markBusy();
     } else if (this.state === "busy") {
       // The CLIs don't re-emit the phrase each frame; once a turn is underway any

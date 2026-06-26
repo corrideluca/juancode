@@ -19,10 +19,33 @@ enum AppEnv {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signalSources: [DispatchSourceSignal] = []
+    /// Held for the app's lifetime to opt out of App Nap. Without it, minimizing
+    /// the window lets macOS nap the process: the pty-read queue is throttled (so
+    /// the agent blocks on a full pipe) and the on-demand Metal terminal view stops
+    /// getting fresh draws — the agent looks frozen after restore. The
+    /// `AllowingIdleSystemSleep` variant disables App Nap but still lets the Mac
+    /// itself idle-sleep, so we're not pinning the whole machine awake.
+    private var activityToken: NSObjectProtocol?
+    private var restoreObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "Streaming live terminal sessions")
+
+        // On-demand Metal views can come back from a minimize showing a stale frame
+        // (no new pty output ⇒ no `setNeedsDisplay`). Force a repaint of all window
+        // content when the app reactivates or a window is de-miniaturized.
+        let center = NotificationCenter.default
+        for name in [NSApplication.didBecomeActiveNotification, NSWindow.didDeminiaturizeNotification] {
+            restoreObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                // Delivered on the main queue, so assuming main-actor isolation is safe.
+                MainActor.assumeIsolated { Self.refreshAllWindows() }
+            })
+        }
 
         // Match the terminal: force a dark, pure-black window chrome instead of the
         // default system gray so the SwiftUI panels blend into the SwiftTerm views.
@@ -41,6 +64,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Force every window's view tree to repaint — defeats the stale-frame an
+    /// on-demand Metal view can show after a minimize/restore cycle.
+    @MainActor private static func refreshAllWindows() {
+        for window in NSApp.windows { markNeedsDisplay(window.contentView) }
+    }
+
+    @MainActor private static func markNeedsDisplay(_ view: NSView?) {
+        guard let view else { return }
+        view.setNeedsDisplay(view.bounds)
+        for sub in view.subviews { markNeedsDisplay(sub) }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -55,8 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct JuancodeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model: AppModel
-    @StateObject private var oracle: OracleModel
+    @State private var model: AppModel
+    @State private var oracle: OracleModel
 
     init() {
         let state: AppState
@@ -66,8 +101,8 @@ struct JuancodeApp: App {
             fatalError("Failed to open juancode database: \(error)")
         }
         let appModel = AppModel(appState: state)
-        _model = StateObject(wrappedValue: appModel)
-        _oracle = StateObject(wrappedValue: OracleModel(app: appModel))
+        _model = State(wrappedValue: appModel)
+        _oracle = State(wrappedValue: OracleModel(app: appModel))
         AppEnv.state = state
 
         // Boot the embedded server so remote clients can attach to the same
@@ -88,14 +123,25 @@ struct JuancodeApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environmentObject(model)
-                .environmentObject(oracle)
+                .environment(model)
+                .environment(oracle)
+                .overlay(alignment: .topTrailing) { PerfOverlay().environment(model) }
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
             CommandGroup(after: .newItem) {
                 Button("New Session") { model.showingNewSession = true }
                     .keyboardShortcut("n", modifiers: [.command])
+            }
+            CommandGroup(after: .toolbar) {
+                Button("Toggle Performance HUD") { PerfMonitor.shared.visible.toggle() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                // Global Oracle + issues access (juancode-6sw). ⌃Space toggles the
+                // Oracle panel from anywhere; ⌘⇧I jumps straight to global issues.
+                Button("Oracle") { oracle.toggle() }
+                    .keyboardShortcut(.space, modifiers: [.control])
+                Button("Global Issues") { oracle.open(tab: .issues) }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
             }
         }
     }

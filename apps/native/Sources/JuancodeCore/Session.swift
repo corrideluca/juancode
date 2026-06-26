@@ -183,7 +183,7 @@ public final class Session: @unchecked Sendable {
         if isNew {
             env.store.insert(meta)
         } else {
-            env.store.update(meta, scrollback: scroll.bytes)
+            env.store.update(meta, scrollback: scroll.replay)
         }
 
         // For Codex we can't pin the session id, so discover it from the rollout file.
@@ -234,7 +234,15 @@ public final class Session: @unchecked Sendable {
     }
 
     /// Type `text` and submit it once the CLI's TUI has rendered (waits for the
-    /// first output so the TUI is in raw mode, then a short delay + carriage return).
+    /// first output so the TUI is in raw mode, then a short delay).
+    ///
+    /// The text is delivered as a **bracketed paste** (`ESC[200~ … ESC[201~`) and
+    /// the submitting Enter is sent as a *separate* keystroke a beat later. This is
+    /// the crucial bit for multi-line seeds (e.g. an Oracle dispatch carrying an
+    /// issue description): if we wrote `"\(text)\r"` in one burst the CLI's TUI
+    /// would auto-detect the fast multi-line chunk as a paste and treat the trailing
+    /// CR as a literal newline — so the message just sits in the input box, unsent.
+    /// Pasting first, then sending a lone CR, makes the CR register as submit.
     public func autoSubmit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -247,7 +255,11 @@ public final class Session: @unchecked Sendable {
             guard let self else { return }
             self.workQueue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
                 guard let self else { return }
-                self.write("\(trimmed)\r")
+                self.write("\u{1B}[200~\(trimmed)\u{1B}[201~")
+                // Let the paste settle in the prompt before the submitting Enter.
+                self.workQueue.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
+                    self?.write("\r")
+                }
             }
         })
     }
@@ -262,7 +274,7 @@ public final class Session: @unchecked Sendable {
     }
 
     public func getScrollback() -> [UInt8] {
-        lock.withLock { scroll.bytes }
+        lock.withLock { scroll.replay }
     }
 
     // MARK: - fan-out
@@ -275,7 +287,7 @@ public final class Session: @unchecked Sendable {
         let (token, replayBytes): (Int, [UInt8]) = lock.withLock {
             let t = nextToken; nextToken += 1
             outputListeners[t] = listener
-            return (t, replay ? scroll.bytes : [])
+            return (t, replay ? scroll.replay : [])
         }
         if replay && !replayBytes.isEmpty { listener(replayBytes) }
         return { [weak self] in self?.lock.withLock { _ = self?.outputListeners.removeValue(forKey: token) } }
@@ -415,7 +427,7 @@ public final class Session: @unchecked Sendable {
         let (meta, bytes) = lock.withLock { () -> (SessionMeta, [UInt8]) in
             _meta.updatedAt = nowMs()
             persistGeneration += 1 // cancel any pending debounce
-            return (_meta, scroll.bytes)
+            return (_meta, scroll.replay)
         }
         env.store.update(meta, scrollback: bytes)
     }

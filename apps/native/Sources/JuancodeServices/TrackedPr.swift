@@ -43,7 +43,7 @@ public struct TrackNotification: Codable, Sendable, Equatable, Identifiable {
 /// The diffable baseline for one tracked PR: which comments/reviews we've already
 /// reacted to, and the last CI status we saw. `baselined` is false until the first
 /// successful poll, so we don't fire events for activity that predates tracking.
-public struct PrTrackSnapshot: Sendable, Equatable {
+public struct PrTrackSnapshot: Sendable, Equatable, Codable {
     public var seenCommentIds: Set<String>
     public var seenReviewIds: Set<String>
     public var checks: PrChecks
@@ -76,7 +76,7 @@ public struct PrClassification: Sendable, Equatable {
 /// One PR under continuous watch: its identity, the agent session driving fixes,
 /// the diff baseline, and any outstanding decisions. The badge `state` is derived
 /// purely from CI status + open decisions.
-public struct TrackedPr: Sendable, Identifiable, Equatable {
+public struct TrackedPr: Sendable, Identifiable, Equatable, Codable {
     public var number: Int
     public var title: String
     public var branch: String

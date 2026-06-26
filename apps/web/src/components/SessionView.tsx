@@ -302,8 +302,10 @@ export function SessionView({ id }: { id: string }) {
             <button
               key={p}
               onClick={() => toggle(p)}
-              className={`rounded-md px-2.5 py-1 capitalize ${
-                side === p ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
+              className={`rounded-md px-2.5 py-1 capitalize transition-colors ${
+                side === p
+                  ? "bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
+                  : "text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200"
               }`}
             >
               {p}
@@ -311,8 +313,10 @@ export function SessionView({ id }: { id: string }) {
           ))}
           <button
             onClick={() => setShowTerminal((v) => !v)}
-            className={`rounded-md px-2.5 py-1 ${
-              showTerminal ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
+            className={`rounded-md px-2.5 py-1 transition-colors ${
+              showTerminal
+                ? "bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
+                : "text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200"
             }`}
           >
             terminal

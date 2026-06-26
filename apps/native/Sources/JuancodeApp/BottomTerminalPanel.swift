@@ -11,7 +11,7 @@ import JuancodeServices
 /// pane is backed by a live `EphemeralPty` (a `$SHELL -i` spawned in `cwd`) rendered
 /// by `SwiftTermEphemeral`.
 struct BottomTerminalPanel: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let cwd: String
 
     private var panel: TerminalPanelModel { model.terminalPanel(cwd) }
@@ -45,6 +45,7 @@ struct BottomTerminalPanel: View {
             .buttonStyle(.borderless)
             .help("Split the active terminal into two panes")
             .disabled(splitDisabled)
+            .clickCursor()
             Button {
                 model.openTerminalTab(cwd: cwd)
             } label: {
@@ -53,6 +54,7 @@ struct BottomTerminalPanel: View {
             .buttonStyle(.borderless)
             .help("New terminal")
             .padding(.trailing, 6)
+            .clickCursor()
         }
         .frame(height: 30)
     }
@@ -74,6 +76,7 @@ struct BottomTerminalPanel: View {
             }
             .buttonStyle(.borderless)
             .help("Close terminal")
+            .clickCursor()
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
