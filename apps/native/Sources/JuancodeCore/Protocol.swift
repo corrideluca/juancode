@@ -124,6 +124,39 @@ public struct SessionMeta: Codable, Sendable, Equatable {
     }
 }
 
+extension SessionMeta {
+    /// Build a persisted session that *adopts* an existing external CLI conversation
+    /// (juancode-iqi): a fresh juancode `id` pointing at an already-known
+    /// `cliSessionId` that ran in `cwd`. `startMs` (when the conversation began)
+    /// becomes `createdAt` so the adopted row sorts by its real age. The title is a
+    /// placeholder mirroring `Session.create`; the live session's poll loop derives
+    /// the real title + usage from the transcript once it's resumed.
+    public static func adopting(
+        provider: ProviderId,
+        cliSessionId: String,
+        cwd: String,
+        startMs: Int,
+        skipPermissions: Bool = true
+    ) -> SessionMeta {
+        let spec = Providers.spec(for: provider)
+        let folder = (cwd as NSString).lastPathComponent
+        return SessionMeta(
+            id: UUID().uuidString.lowercased(),
+            provider: provider,
+            cwd: cwd,
+            title: "\(spec.label) · \(folder.isEmpty ? cwd : folder)",
+            status: .running,
+            exitCode: nil,
+            createdAt: startMs,
+            updatedAt: nowMs(),
+            cliSessionId: cliSessionId,
+            skipPermissions: skipPermissions,
+            worktreePath: nil,
+            usage: nil
+        )
+    }
+}
+
 /// Milliseconds since the unix epoch — the timestamp unit the TS layer uses.
 @inline(__always)
 public func nowMs() -> Int {

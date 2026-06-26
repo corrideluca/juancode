@@ -16,6 +16,10 @@ public enum ClientMessage: Sendable {
                 initialInput: String?, skipPermissions: Bool?, isolateWorktree: Bool?)
     case attach(sessionId: String, cols: Int, rows: Int)
     case reactivate(sessionId: String, cols: Int, rows: Int)
+    /// Adopt an external CLI conversation (one started in a plain terminal) by its
+    /// own resumable id, persisting a juancode session row and resuming it live.
+    case adoptExternal(provider: String, cliSessionId: String, cwd: String,
+                       startMs: Int, cols: Int, rows: Int)
     case setSkipPermissions(sessionId: String, skipPermissions: Bool, cols: Int, rows: Int)
     case input(sessionId: String, data: String)
     case resize(sessionId: String, cols: Int, rows: Int)
@@ -27,7 +31,7 @@ public enum ClientMessage: Sendable {
 extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
-        case sessionId, data, file, requestId
+        case sessionId, data, file, requestId, cliSessionId, startMs
     }
 
     public init(from decoder: Decoder) throws {
@@ -52,6 +56,13 @@ extension ClientMessage: Decodable {
             self = .reactivate(sessionId: try c.decode(String.self, forKey: .sessionId),
                                cols: try c.decode(Int.self, forKey: .cols),
                                rows: try c.decode(Int.self, forKey: .rows))
+        case "adoptExternal":
+            self = .adoptExternal(provider: try c.decode(String.self, forKey: .provider),
+                                  cliSessionId: try c.decode(String.self, forKey: .cliSessionId),
+                                  cwd: try c.decode(String.self, forKey: .cwd),
+                                  startMs: try c.decode(Int.self, forKey: .startMs),
+                                  cols: try c.decode(Int.self, forKey: .cols),
+                                  rows: try c.decode(Int.self, forKey: .rows))
         case "setSkipPermissions":
             self = .setSkipPermissions(sessionId: try c.decode(String.self, forKey: .sessionId),
                                        skipPermissions: try c.decode(Bool.self, forKey: .skipPermissions),

@@ -279,6 +279,35 @@ final class AppModel {
         }
     }
 
+    /// Adopt an external CLI conversation identified directly by
+    /// `(provider, cliSessionId, cwd, startMs)` — the in-process twin of the
+    /// server's `.adoptExternal` wire path, and the lower-level entry behind
+    /// `listExternalSessions`-driven UI (juancode-iqi). Persists a juancode row
+    /// pointing at the conversation and resumes it live with no prior scrollback
+    /// (the CLI reprints its own context). No-op when we already own this
+    /// `cliSessionId`. Title + usage derive once the resumed session polls its
+    /// transcript. Returns the new meta (nil if skipped).
+    @discardableResult
+    func adoptExternal(provider: ProviderId, cliSessionId: String, cwd: String, startMs: Int,
+                       select: Bool = true) -> SessionMeta? {
+        guard !appState.store.usedCliSessionIds().contains(cliSessionId) else { return nil }
+        let meta = SessionMeta.adopting(provider: provider, cliSessionId: cliSessionId,
+                                        cwd: cwd, startMs: startMs)
+        appState.store.insert(meta)
+        refresh()
+        if select { selection = meta.id }
+        Task {
+            do {
+                let grid = TerminalGrid.spawn
+                _ = try appState.registry.resume(meta, cols: grid.cols, rows: grid.rows)
+                refresh()
+            } catch {
+                errorMessage = "Couldn't resume terminal session: \(error)"
+            }
+        }
+        return meta
+    }
+
     // MARK: - Open pull requests (per-folder PR popover)
 
     /// The cached PR list for `cwd`, if loaded yet.

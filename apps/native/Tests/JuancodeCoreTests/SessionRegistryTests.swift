@@ -131,6 +131,29 @@ import Testing
         #expect(store.meta(s.id) != nil)     // inserted on create
     }
 
+    @Test func adoptingExternalMetaResumesAndPersists() async throws {
+        // Mirror the adopt path (juancode-iqi): build a row pointing at an existing
+        // external CLI conversation, persist it, then resume it live with no prior
+        // scrollback (the CLI reprints its own context).
+        let store = InMemorySessionStore()
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'RESUMED\\n'\ncat\n"), store: store))
+        let meta = SessionMeta.adopting(provider: .claude, cliSessionId: "ext-conv-1",
+                                        cwd: cwd, startMs: 123_456)
+        store.insert(meta)
+        let s = try reg.resume(meta, cols: 80, rows: 24, priorScrollback: [])
+        defer { s.kill() }
+
+        #expect(s.meta.id == meta.id)
+        #expect(s.meta.cliSessionId == "ext-conv-1")
+        #expect(s.meta.status == .running)
+        #expect(store.usedCliSessionIds().contains("ext-conv-1"))
+
+        let sink = ByteSink()
+        s.subscribeOutput(replay: true) { sink.add($0) }
+        await poll { sink.text.contains("RESUMED") }
+        #expect(sink.text.contains("RESUMED"))
+    }
+
     @Test func onCreateFiresForNewSessions() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n")))
         let seen = ByteSink()
