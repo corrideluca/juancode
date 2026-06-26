@@ -17,13 +17,31 @@ final class AppModel {
     var activities: [String: SessionActivity] = [:]
     var selection: String?
     var showingNewSession = false
+
+    // MARK: Keyboard navigation (juancode-vgm)
+    //
+    // Vim-style sidebar nav + ⌃H/⌃L pane focus, driven by a window-scoped NSEvent
+    // monitor (see `installPaneNavigation`). The monitor pre-empts the terminal's
+    // first responder, so these all work even while a session is focused.
+
+    /// Session IDs in the order they appear in the sidebar, top-to-bottom (folders
+    /// flattened, externals excluded). Published by `SidebarView`; drives j/k.
+    var navOrder: [String] = []
+    /// Bumped to request the live terminal grab focus (Enter / l / ⌃L). Threaded into
+    /// `SwiftTermLive.focusToken`.
+    var terminalFocusToken = 0
+    /// Bumped to request the sidebar list grab focus (⌃H). Drives a `@FocusState`.
+    var sidebarFocusToken = 0
+    /// While true (sidebar is being keyboard-navigated) a freshly-shown terminal must
+    /// not auto-grab focus on appear, or each j/k would yank focus back into the pty.
+    var suppressTerminalAutoFocus = false
     /// Top command-bar sheets (juancode-6sw / q6q / 38z).
     var showingWorktrees = false
     var showingTrackedPrs = false
     var errorMessage: String?
-    /// Sessions whose accept-all flag is mid-flip (pty being resume-restarted), so
-    /// the UI can disable the control until the new pty is up.
-    var flippingPermissions: Set<String> = []
+    /// The file currently open in the floating editor overlay, if any. A single
+    /// overlay at a time; hosted at the window root by `EditorHost`.
+    var editing: EditorTarget?
 
     /// Open-PR lists per folder cwd, loaded lazily by `FolderHeader` and refreshed
     /// in the background. Mirrors the web's per-folder `useQuery(["prs", cwd])`.
@@ -53,32 +71,37 @@ final class AppModel {
 
     func activity(_ id: String) -> SessionActivity? { activities[id] }
 
-    // MARK: - Queued follow-up messages (juancode-9o8)
-
-    /// One buffered follow-up instruction per session, keyed by session id. While a
-    /// session is busy/waiting the user can line up their next message here; it's
-    /// auto-sent (written to the pty with a trailing Enter) on the next busy/waiting
-    /// → idle edge for that session, then cleared. Keyed by id so switching sessions
-    /// preserves each session's pending draft. Mirrors the web SessionView's
-    /// client-side `queued` buffer + idle-edge detection.
-    var queuedDrafts: [String: String] = [:]
-
-    /// The pending follow-up for `id`, if any.
-    func queuedDraft(_ id: String) -> String? { queuedDrafts[id] }
-
-    /// Buffer (or replace) a follow-up to auto-send on the next idle edge. Trims the
-    /// input; an empty message clears the buffer instead.
-    func queueDraft(_ id: String, _ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { queuedDrafts[id] = nil } else { queuedDrafts[id] = trimmed }
-    }
-
-    /// Drop the queued follow-up for `id` before it sends.
-    func cancelQueuedDraft(_ id: String) { queuedDrafts[id] = nil }
-
     func isLive(_ id: String) -> Bool { appState.registry.get(id) != nil }
 
     func liveSession(_ id: String) -> Session? { appState.registry.get(id) }
+
+    /// Move the sidebar selection by `delta` rows within `navOrder` (clamped). With
+    /// nothing selected, jumps to the first (down) or last (up) row.
+    func moveSelection(by delta: Int) {
+        guard !navOrder.isEmpty else { return }
+        if let cur = selection, let idx = navOrder.firstIndex(of: cur) {
+            selection = navOrder[max(0, min(navOrder.count - 1, idx + delta))]
+        } else {
+            selection = delta >= 0 ? navOrder.first : navOrder.last
+        }
+    }
+
+    func selectFirst() { if let f = navOrder.first { selection = f } }
+    func selectLast() { if let l = navOrder.last { selection = l } }
+
+    /// Move keyboard focus to the sidebar (⌃H): suppress terminal auto-focus so j/k
+    /// don't bounce focus back into the pty, and nudge the list to become first responder.
+    func focusSidebar() {
+        suppressTerminalAutoFocus = true
+        if selection == nil { selectFirst() }
+        sidebarFocusToken &+= 1
+    }
+
+    /// Move keyboard focus into the live terminal (Enter / l / ⌃L).
+    func focusTerminal() {
+        suppressTerminalAutoFocus = false
+        terminalFocusToken &+= 1
+    }
 
     func scrollback(_ id: String) -> [UInt8] {
         appState.registry.get(id)?.getScrollback() ?? appState.store.getScrollback(id) ?? []
@@ -90,16 +113,18 @@ final class AppModel {
         activityCancels[s.id] = s.onActivity { [weak self] st, _ in
             Task { @MainActor in
                 guard let self else { return }
-                let was = self.activities[s.id]
+                let prev = self.activities[s.id]
                 self.activities[s.id] = st
-                // Auto-send any queued follow-up on a real busy/waiting → idle edge
-                // (not the first observation), while the session is alive. Mirrors the
-                // web SessionView idle-edge detection. Lives here (not in the view) so
-                // it fires even when the SessionContainer for `s` isn't on screen.
-                if st == .idle, let was, was != .idle,
-                   let text = self.queuedDrafts[s.id], self.isLive(s.id) {
-                    s.write("\(text)\r")
-                    self.queuedDrafts[s.id] = nil
+                // The agent stays `busy` through a turn (including any file edits) and
+                // flips to idle / waiting-input when it finishes — so a busy → non-busy
+                // transition is the moment the working tree has settled. Re-diff then so
+                // the Changes panel reflects the agent's edits without a manual Refresh.
+                // Scoped to sessions whose diff is already cached (panel has been opened)
+                // or the selected one, to avoid shelling out to git for every background
+                // session on every turn.
+                if prev == .busy, st != .busy,
+                   self.diffBySession[s.id] != nil || self.selection == s.id {
+                    self.loadChanges(s.id)
                 }
             }
         }
@@ -166,6 +191,19 @@ final class AppModel {
         Task { await create(provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: false) }
     }
 
+    /// ⌘N: open a new session mirroring the current selection's agent + working
+    /// directory, so the common "another window on the same project" case is one
+    /// keystroke. Falls back to the New Session sheet when nothing is selected (no
+    /// context to clone from).
+    func quickNewSession() {
+        guard let sel = selection,
+              let meta = (sessions + externalSessions).first(where: { $0.id == sel }) else {
+            showingNewSession = true
+            return
+        }
+        createInFolder(provider: meta.provider, cwd: meta.cwd)
+    }
+
     // MARK: - External (terminal) sessions
 
     /// claude/codex conversations found on disk that juancode didn't create —
@@ -180,7 +218,7 @@ final class AppModel {
     /// How many terminal sessions are currently loaded; grows by `externalPageSize`
     /// on "Load more" so we never read every transcript at once.
     @ObservationIgnored private var externalLimit = 0
-    private let externalPageSize = 10
+    private let externalPageSize = 25
 
     /// True if `id` is a not-yet-imported terminal session (vs. one of ours).
     func isExternal(_ id: String) -> Bool { externalIds.contains(id) }
@@ -502,26 +540,6 @@ final class AppModel {
         persistTracked()
     }
 
-    /// Flip "accept all" (skip permission prompts) on a live session. There's no
-    /// way to change a running CLI's permission level in place, so the registry
-    /// resume-restarts the pty under the same juancode id, preserving the
-    /// conversation + scrollback. Mirrors the WS `setSkipPermissions` path.
-    func setSkipPermissions(_ id: String, to skip: Bool) async {
-        guard isLive(id), !flippingPermissions.contains(id) else { return }
-        flippingPermissions.insert(id)
-        defer { flippingPermissions.remove(id) }
-        do {
-            // Off the main actor: kills the old pty and forkpty()s a new one.
-            let registry = appState.registry
-            _ = try await Task.detached(priority: .userInitiated) {
-                try await registry.setSkipPermissions(id, skipPermissions: skip, cols: 80, rows: 24)
-            }.value
-            refresh()
-        } catch {
-            errorMessage = "Failed to change permissions: \(error)"
-        }
-    }
-
     /// Revive an exited session (mirrors the WS `reactivate` path).
     func reactivate(_ id: String) async {
         if isLive(id) { return }
@@ -656,6 +674,25 @@ final class AppModel {
         }
     }
 
+    /// Open `file` in the user's real editor as the floating overlay (`EditorHost`).
+    /// Spawns the ephemeral pty now so the overlay binds a live pty; no-op if one's
+    /// already open or the spawn fails (`openEditor` sets a git note). The overlay
+    /// resizes the pty to its real grid on appear, so the seed cols/rows are nominal.
+    func openEditorOverlay(_ sessionId: String, file: String) {
+        guard editing == nil else { return }
+        if let pty = openEditor(sessionId, file: file, cols: 80, rows: 24) {
+            editing = EditorTarget(sessionId: sessionId, file: file, pty: pty)
+        }
+    }
+
+    /// Dismiss the editor overlay (idempotent) and refresh the session's diff, since
+    /// the editor may have changed the file. Mirrors the web `onClose` → refetch.
+    func closeEditorOverlay(_ id: UUID) {
+        guard let target = editing, target.id == id else { return }
+        editing = nil
+        loadChanges(target.sessionId)
+    }
+
     // MARK: - Bottom terminal panel (per-workdir)
 
     /// VS Code-style bottom shell terminals, keyed by FOLDER cwd (not session id):
@@ -668,6 +705,26 @@ final class AppModel {
     /// Live shell ptys for every open pane, keyed by pane id. Shared across all
     /// folders; entries are removed + killed when their pane closes.
     private var shellPtys: [TerminalPaneID: EphemeralPty] = [:]
+
+    /// Whether the bottom shell-terminal panel is shown. Global (shared across all
+    /// sessions) and persisted under the key the session header used, so it survives
+    /// restarts. Toggled from the header CTA or the ⌃T global shortcut.
+    var bottomTerminalShown: Bool = UserDefaults.standard.bool(forKey: "session.bottomPanel.shown") {
+        didSet { UserDefaults.standard.set(bottomTerminalShown, forKey: "session.bottomPanel.shown") }
+    }
+
+    /// Toggle the bottom terminal panel. When opening it, seed the first shell in the
+    /// selected session's folder if that folder has none yet (mirrors the header
+    /// button). No-op seeding if nothing is selected.
+    func toggleBottomTerminal() {
+        bottomTerminalShown.toggle()
+        guard bottomTerminalShown,
+              let id = selection,
+              let cwd = sessions.first(where: { $0.id == id })?.cwd,
+              terminalPanel(cwd).isEmpty
+        else { return }
+        openTerminalTab(cwd: cwd)
+    }
 
     /// The terminal panel model for `cwd` (empty if none opened yet).
     func terminalPanel(_ cwd: String) -> TerminalPanelModel { terminalPanels[cwd] ?? .init() }
@@ -924,7 +981,6 @@ final class AppModel {
         appState.registry.get(id)?.kill()
         appState.store.delete(id)
         activityCancels[id]?(); activityCancels[id] = nil
-        queuedDrafts[id] = nil
         if selection == id { selection = nil }
         refresh()
         if let wt = meta?.worktreePath {

@@ -3,14 +3,6 @@ import AppKit
 import JuancodeCore
 import JuancodeServices
 
-/// One open editor overlay: the file being edited and its live ephemeral pty.
-/// `Identifiable` so it can drive a SwiftUI `.sheet(item:)`.
-private struct EditorTarget: Identifiable {
-    let id = UUID()
-    let file: String
-    let pty: EphemeralPty
-}
-
 /// Native SwiftUI port of the web `ChangesPanel` (+ `GitActions`), re-laid-out as a
 /// VS Code-style "Source Control" view (juancode-dxg): a resizable SIDE panel with a
 /// directory FILE TREE of changed files on the left (hideable) and, on the right, a
@@ -41,8 +33,6 @@ struct ChangesPanel: View {
     /// Closing-note composer for "Submit review".
     @State private var showSubmit = false
     @State private var finalNote = ""
-    /// The file currently open in the editor overlay, if any.
-    @State private var editing: EditorTarget?
     /// Persisted width of the tree pane in the split.
     @AppStorage("changes.treeWidth") private var treeWidth: Double = 260
     /// Whether the left file-tree pane is shown (toggled from the header).
@@ -68,13 +58,6 @@ struct ChangesPanel: View {
         }
         .onAppear { if diff == nil { model.loadChanges(sessionId) } }
         .onChange(of: diff) { _, _ in syncSelectionAndExpansion() }
-        .sheet(item: $editing) { target in
-            EditorOverlay(
-                file: target.file,
-                pty: target.pty,
-                onExit: { [id = target.id] in Task { @MainActor in closeEditor(id) } },
-                onForceClose: { target.pty.kill(); closeEditor(target.id) })
-        }
         .perfTrackBody()
     }
 
@@ -91,23 +74,6 @@ struct ChangesPanel: View {
         } else if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
             selectedPath = files.first?.path
         }
-    }
-
-    /// Open `file` in the user's real editor via an ephemeral pty (spawned now so the
-    /// overlay binds a live pty). No-op if the spawn fails (AppModel sets a note).
-    private func openEditor(_ file: String) {
-        guard editing == nil else { return }
-        if let pty = model.openEditor(sessionId, file: file, cols: 80, rows: 24) {
-            editing = EditorTarget(file: file, pty: pty)
-        }
-    }
-
-    /// Dismiss the overlay (idempotent) and refresh the diff, since the editor may
-    /// have changed the file. Mirrors the web `onClose` → refetch.
-    private func closeEditor(_ id: UUID) {
-        guard editing?.id == id else { return }
-        editing = nil
-        model.loadChanges(sessionId)
     }
 
     // MARK: - Header (counts, filter, refresh, git actions)
@@ -365,7 +331,7 @@ struct ChangesPanel: View {
                                     for: file.path, in: model.review(sessionId)?.findings ?? []),
                                 collapsed: collapsedFiles.contains(file.path),
                                 onToggleCollapse: { toggleFileCollapse(file.path) },
-                                onEdit: { openEditor(file.path) },
+                                onEdit: { model.openEditorOverlay(sessionId, file: file.path) },
                                 collapsible: true)
                                 .id(file.path)
                         }

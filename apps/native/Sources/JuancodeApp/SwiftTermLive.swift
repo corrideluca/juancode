@@ -45,6 +45,66 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
     }
 }
 
+/// Vim-style sidebar navigation + ⌃H/⌃L pane focus (juancode-vgm).
+///
+/// The live terminal makes itself first responder and SwiftTerm swallows every
+/// keystroke, so a SwiftUI `.onKeyPress`/`.keyboardShortcut` can't see these keys
+/// while a session is focused. A window-scoped local `keyDown` monitor sits *ahead*
+/// of the responder chain — returning `nil` cancels dispatch, so we can act on a key
+/// before the terminal ever sees it. We derive the active pane from the live first
+/// responder (robust to mouse clicks) rather than tracking it ourselves:
+///
+/// - **In the terminal:** only ⌃H is intercepted (→ focus sidebar). Everything else,
+///   including ⌃L (clear screen), passes straight through, so normal typing is intact.
+/// - **In the sidebar:** j/k (and ↓/↑) move the selection, g/G jump to first/last,
+///   Enter/l/⌃L open the session (focus the terminal). Modified keys pass through so
+///   app shortcuts (⌘N, ⌃Space, …) still fire; plain keys are swallowed so they don't
+///   leak into the pty behind the list.
+///
+/// Scoped to our own key window (and only when no sheet is attached / no text field is
+/// editing) so it never hijacks dialogs or the filter field.
+@MainActor
+func installPaneNavigation(model: AppModel, host: NSView) -> Any? {
+    let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak host] keyCode, mods in
+        guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
+        else { return false }
+        let fr = window.firstResponder
+        let ctrl = mods.contains(.control)
+
+        // Terminal pane: only ⌃H escapes to the sidebar; all else (incl. ⌃L) is the pty's.
+        if fr is TerminalView {
+            // Back in the pty by any route (incl. a mouse click) — clear the nav guard so
+            // a later row click auto-focuses its terminal again. Guarded to avoid churn.
+            if model.suppressTerminalAutoFocus { model.suppressTerminalAutoFocus = false }
+            guard ctrl, keyCode == 4 else { return false } // ⌃H
+            window.makeFirstResponder(nil)
+            model.focusSidebar()
+            return true
+        }
+        // Editing the filter / rename field — leave typing untouched.
+        if fr is NSTextView { return false }
+
+        // Sidebar pane.
+        if ctrl, keyCode == 37 { model.focusTerminal(); return true } // ⌃L → terminal
+        // Let modified keys through so app-level shortcuts keep working.
+        if !mods.intersection([.command, .control, .option]).isEmpty { return false }
+        switch keyCode {
+        case 38, 125: model.moveSelection(by: 1); return true   // j / ↓
+        case 40, 126: model.moveSelection(by: -1); return true  // k / ↑
+        case 36, 76, 37: model.focusTerminal(); return true     // ⏎ / enter / l → open
+        case 5: mods.contains(.shift) ? model.selectLast() : model.selectFirst(); return true // g / G
+        case 53: return false                                   // Esc passes through
+        default: return true                                    // swallow; don't leak to the pty
+        }
+    }
+    return NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        let keyCode = event.keyCode
+        let mods = event.modifierFlags
+        let consumed = MainActor.assumeIsolated { handle(keyCode, mods) }
+        return consumed ? nil : event
+    }
+}
+
 /// Hosts a SwiftTerm `TerminalView`, owning the two things our thin SwiftUI
 /// wrappers otherwise leave to chance:
 ///
@@ -63,6 +123,11 @@ final class TerminalHostView: NSView {
     /// every time we re-pin. Drives the pty SIGWINCH from the *actual* laid-out size
     /// rather than relying on SwiftTerm's change-only delegate — see `pinTerminal`.
     var onGrid: ((Int, Int) -> Void)?
+    /// When true, grab keyboard focus the first time we land in a window, so opening
+    /// a session puts the cursor in the terminal without a manual click. Set only for
+    /// the live terminal (the read-only replay view leaves it off).
+    var focusOnAppear = false
+    private var didAutoFocus = false
 
     init(terminal: TerminalView) {
         self.terminal = terminal
@@ -80,6 +145,19 @@ final class TerminalHostView: NSView {
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    // Focus the terminal the first time it joins a window so a freshly-opened session
+    // is ready to type into. Deferred to the next run-loop tick: at `viewDidMoveToWindow`
+    // time the window may not yet be key, so `makeFirstResponder` could be ignored.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard focusOnAppear, !didAutoFocus, window != nil else { return }
+        didAutoFocus = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            window.makeFirstResponder(self.terminal)
+        }
+    }
 
     /// Pin the terminal to our exact bounds. SwiftTerm's own `setFrameSize`
     /// recomputes the grid (cols/rows) and fires `sizeChanged` from here, so this is
@@ -119,6 +197,15 @@ final class TerminalHostView: NSView {
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
         pinTerminal()
+    }
+
+    /// Make the terminal first responder on demand (⌃Space focus request). Deferred
+    /// a tick so it works even if the window isn't key yet at call time.
+    func focusTerminal() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            window.makeFirstResponder(self.terminal)
+        }
     }
 
     /// Apply the authoritative SwiftUI size (from the wrapping GeometryReader, via
@@ -195,10 +282,19 @@ struct SwiftTermLive: View {
     /// next session. True for the main session view; false for the Oracle dock (its
     /// narrower grid must not shrink the size new main-window sessions boot at).
     var remembersSize: Bool = true
+    /// Bump to request keyboard focus (⌃Space). Each change makes the terminal first
+    /// responder; the initial value is ignored (the view auto-focuses on appear).
+    var focusToken: Int = 0
+    /// Whether the terminal grabs keyboard focus the first time it appears. False
+    /// while the sidebar is being keyboard-navigated, so opening rows with j/k doesn't
+    /// yank focus into the pty on every move (juancode-vgm).
+    var autoFocusOnAppear: Bool = true
 
     var body: some View {
         GeometryReader { proxy in
-            SwiftTermRepresentable(session: session, targetSize: proxy.size, remembersSize: remembersSize)
+            SwiftTermRepresentable(session: session, targetSize: proxy.size,
+                                   remembersSize: remembersSize, focusToken: focusToken,
+                                   autoFocusOnAppear: autoFocusOnAppear)
         }
     }
 }
@@ -211,6 +307,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     /// The exact size SwiftUI laid this view out at (from the wrapping GeometryReader).
     var targetSize: CGSize
     var remembersSize: Bool
+    /// Latest focus-request token; a change vs. the coordinator's last makes the
+    /// terminal grab focus (⌃Space). See `SwiftTermLive.focusToken`.
+    var focusToken: Int = 0
+    var autoFocusOnAppear: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
 
@@ -225,6 +325,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         tv.allowMouseReporting = false
         context.coordinator.attach(to: tv)
         let host = TerminalHostView(terminal: tv)
+        host.focusOnAppear = autoFocusOnAppear
         host.onDrop = { [session] text in session.write(text) }
         host.onGrid = { cols, rows in context.coordinator.gridChanged(cols: cols, rows: rows) }
         return host
@@ -235,6 +336,12 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         // the laid-out size changes (open, panel toggle, window/divider drag), so the
         // grid + pty always track the real on-screen size.
         nsView.applySize(targetSize)
+        // Honor a focus request (⌃Space): only when the token actually changed, so
+        // routine size-driven updates don't keep stealing focus.
+        if focusToken != context.coordinator.lastFocusToken {
+            context.coordinator.lastFocusToken = focusToken
+            nsView.focusTerminal()
+        }
     }
 
     // Without this, SwiftUI sizes the bridged view to its intrinsic size and it
@@ -268,6 +375,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private var activeObservers: [Any] = []
         /// Whether to record this terminal's size as the next spawn size (see SwiftTermLive).
         private let remembersSize: Bool
+        /// Last focus-request token honored, so a focus only fires when it changes.
+        var lastFocusToken = 0
 
         init(session: Session, remembersSize: Bool) {
             self.session = session

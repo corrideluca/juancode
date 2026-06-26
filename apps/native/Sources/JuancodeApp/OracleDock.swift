@@ -292,7 +292,7 @@ private struct OracleChatView: View {
             // Same pattern as the main session pane (which resizes correctly): a
             // plain fill. `sizeThatFits` on SwiftTermLive makes the bridged view take
             // the proposed size.
-            SwiftTermLive(session: session, remembersSize: false)
+            SwiftTermLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)
                 .id(ObjectIdentifier(session))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

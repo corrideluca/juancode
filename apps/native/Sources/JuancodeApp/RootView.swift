@@ -18,6 +18,8 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .background(WindowBackground(color: .black))
+        // Window-scoped key monitor for vim sidebar nav + ⌃H/⌃L pane focus (juancode-vgm).
+        .background(PaneNavInstaller(model: model).frame(width: 0, height: 0))
         // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs and
         // Worktrees live in the window toolbar — reachable from any session.
         .toolbar {
@@ -47,6 +49,9 @@ struct RootView: View {
         // The Oracle helper opens as a centered overlay over the whole window,
         // from the toolbar or ⌃Space (juancode-wjg / juancode-6sw).
         .overlay { OracleDock() }
+        // The file editor opens as a large, resizable floating window over the whole
+        // window (not the narrow Changes side panel a sheet was confined near).
+        .overlay { EditorHost() }
         .sheet(isPresented: $model.showingWorktrees) {
             WorktreesSheet()
         }
@@ -90,6 +95,30 @@ private struct WindowBackground: NSViewRepresentable {
     }
 }
 
+/// Hidden bridge that installs the window-scoped keyboard monitor for vim-style
+/// sidebar navigation and ⌃H/⌃L pane focus (juancode-vgm). The monitor must sit ahead
+/// of the terminal in the responder chain, which only an NSEvent local monitor can do.
+private struct PaneNavInstaller: NSViewRepresentable {
+    let model: AppModel
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        context.coordinator.monitor = installPaneNavigation(model: model, host: v)
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let m = coordinator.monitor { NSEvent.removeMonitor(m) }
+        coordinator.monitor = nil
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator { var monitor: Any? }
+}
+
 /// A folder's sessions, mirroring the web `FolderGroup` (groupByFolder).
 private struct FolderGroup: Identifiable {
     let cwd: String
@@ -109,6 +138,14 @@ struct SidebarView: View {
     @State private var showArchived = false
     /// Project folders the user has collapsed (by cwd); their session rows are hidden.
     @State private var collapsedFolders: Set<String> = []
+    /// Folders expanded past the preview cap into a fixed-height, internally
+    /// scrollable box (by cwd). Otherwise only the first `folderPreviewCount` show.
+    @State private var expandedFolders: Set<String> = []
+
+    /// How many session rows a folder shows before offering "Load more".
+    private let folderPreviewCount = 5
+    /// Max height of an expanded folder's scrollable session box (~5 rows).
+    private let folderScrollMaxHeight: CGFloat = 220
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
@@ -116,6 +153,8 @@ struct SidebarView: View {
     @State private var showingSearch = false
     /// Whether the auth & MCP status sheet is open (juancode-daw).
     @State private var showingStatus = false
+    /// Whether the session list holds keyboard focus, for vim-style nav (juancode-vgm).
+    @FocusState private var listFocused: Bool
 
     /// How many archived sessions exist (for the toggle label / visibility).
     private var archivedCount: Int { model.sessions.filter(\.archived).count }
@@ -152,6 +191,20 @@ struct SidebarView: View {
         .sorted { $0.cwd.localizedCompare($1.cwd) == .orderedAscending }
     }
 
+    /// Selectable session IDs in on-screen order (folders flattened, collapsed folders
+    /// and clipped previews respected, externals excluded) — what j/k steps through.
+    /// Published into `model.navOrder` so the keyboard monitor can move the selection.
+    private var visibleOrderedIDs: [String] {
+        var ids: [String] = []
+        for group in groups where !collapsedFolders.contains(group.cwd) {
+            let s = group.sessions
+            let shown = (s.count <= folderPreviewCount || expandedFolders.contains(group.cwd))
+                ? s : Array(s.prefix(folderPreviewCount))
+            for meta in shown where !model.isExternal(meta.id) { ids.append(meta.id) }
+        }
+        return ids
+    }
+
     var body: some View {
         @Bindable var model = model
         return VStack(spacing: 0) {
@@ -160,33 +213,12 @@ struct SidebarView: View {
                 .font(.system(size: 12))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
+            ScrollViewReader { proxy in
             List(selection: $model.selection) {
                 ForEach(groups) { group in
                     Section {
                         if !collapsedFolders.contains(group.cwd) {
-                            ForEach(group.sessions, id: \.id) { meta in
-                                let external = model.isExternal(meta.id)
-                                SessionRow(meta: meta, activity: model.activity(meta.id),
-                                           live: model.isLive(meta.id), external: external,
-                                           tracked: external ? nil : model.trackedPr(forSession: meta.id),
-                                           onResume: external ? { model.importExternalSession(meta.id) } : nil)
-                                    .tag(meta.id)
-                                    .selectionDisabled(external)
-                                    .contextMenu {
-                                        if model.isExternal(meta.id) {
-                                            Button("Resume in juancode") { model.importExternalSession(meta.id) }
-                                        } else {
-                                            Button("Rename…") { beginRename(meta) }
-                                            if meta.archived {
-                                                Button("Unarchive") { model.setArchived(meta.id, false) }
-                                            } else {
-                                                Button("Archive") { model.setArchived(meta.id, true) }
-                                            }
-                                            Divider()
-                                            Button("Delete", role: .destructive) { model.delete(meta.id) }
-                                        }
-                                    }
-                            }
+                            sessionList(group)
                         }
                     } header: {
                         FolderHeader(group: group, collapsed: collapsedFolders.contains(group.cwd)) {
@@ -214,6 +246,17 @@ struct SidebarView: View {
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
+            .focused($listFocused)
+            // ⌃H asks the list to take focus; j/k then move the selection (juancode-vgm).
+            .onChange(of: model.sidebarFocusToken) { _, _ in listFocused = true }
+            // Keep the keyboard monitor's nav order in sync with what's actually shown.
+            .onChange(of: visibleOrderedIDs) { _, ids in model.navOrder = ids }
+            // Keep the moved selection on-screen (g/G can jump far).
+            .onChange(of: model.selection) { _, sel in
+                guard let sel else { return }
+                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(sel, anchor: .center) }
+            }
+            }
             if let total = totalUsage, let label = total.badgeLabel {
                 Divider()
                 HStack(spacing: 4) {
@@ -239,7 +282,7 @@ struct SidebarView: View {
             }
         }
         .background(Color.black)
-        .onAppear { model.loadExternalSessions() }
+        .onAppear { model.loadExternalSessions(); model.navOrder = visibleOrderedIDs }
         .toolbar {
             ToolbarItem {
                 Button { showingSearch = true } label: { Image(systemName: "magnifyingglass") }
@@ -278,6 +321,100 @@ struct SidebarView: View {
         .perfTrackBody()
     }
 
+    /// A folder's session rows: all of them if ≤ the preview cap; otherwise the
+    /// first `folderPreviewCount` with a "Load more" affordance, and once expanded a
+    /// fixed-height box that scrolls internally so the sidebar doesn't grow.
+    @ViewBuilder
+    private func sessionList(_ group: FolderGroup) -> some View {
+        let sessions = group.sessions
+        if sessions.count <= folderPreviewCount {
+            ForEach(sessions, id: \.id) { meta in nativeRow(meta) }
+        } else if expandedFolders.contains(group.cwd) {
+            scrollBox(sessions, cwd: group.cwd)
+        } else {
+            ForEach(sessions.prefix(folderPreviewCount), id: \.id) { meta in nativeRow(meta) }
+            Button { expandedFolders.insert(group.cwd) } label: {
+                Label("Load more (\(sessions.count - folderPreviewCount))",
+                      systemImage: "chevron.down.circle")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .clickCursor()
+        }
+    }
+
+    /// All of a folder's sessions inside a height-capped, internally scrolling box.
+    /// These rows can't use the List's selection, so taps set the selection by hand.
+    @ViewBuilder
+    private func scrollBox(_ sessions: [SessionMeta], cwd: String) -> some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(sessions, id: \.id) { meta in scrollRow(meta) }
+                }
+            }
+            .frame(maxHeight: folderScrollMaxHeight)
+            Button { expandedFolders.remove(cwd) } label: {
+                Label("Show less", systemImage: "chevron.up.circle").font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .clickCursor()
+            .padding(.top, 2)
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+    }
+
+    /// A row rendered as a native List cell (selection + keyboard nav via `.tag`).
+    @ViewBuilder
+    private func nativeRow(_ meta: SessionMeta) -> some View {
+        let external = model.isExternal(meta.id)
+        sessionRow(meta)
+            .tag(meta.id)
+            .selectionDisabled(external)
+            .contextMenu { rowContextMenu(meta) }
+    }
+
+    /// A row inside the scroll box: manual tap-to-select + highlight (the List's own
+    /// selection machinery doesn't reach views nested in a ScrollView).
+    @ViewBuilder
+    private func scrollRow(_ meta: SessionMeta) -> some View {
+        let external = model.isExternal(meta.id)
+        sessionRow(meta)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(model.selection == meta.id ? Color.accentColor.opacity(0.25) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+            .onTapGesture { if !external { model.selection = meta.id } }
+            .contextMenu { rowContextMenu(meta) }
+    }
+
+    private func sessionRow(_ meta: SessionMeta) -> SessionRow {
+        let external = model.isExternal(meta.id)
+        return SessionRow(meta: meta, activity: model.activity(meta.id),
+                          live: model.isLive(meta.id), external: external,
+                          tracked: external ? nil : model.trackedPr(forSession: meta.id),
+                          onResume: external ? { model.importExternalSession(meta.id) } : nil)
+    }
+
+    @ViewBuilder
+    private func rowContextMenu(_ meta: SessionMeta) -> some View {
+        if model.isExternal(meta.id) {
+            Button("Resume in juancode") { model.importExternalSession(meta.id) }
+        } else {
+            Button("Rename…") { beginRename(meta) }
+            if meta.archived {
+                Button("Unarchive") { model.setArchived(meta.id, false) }
+            } else {
+                Button("Archive") { model.setArchived(meta.id, true) }
+            }
+            Divider()
+            Button("Delete", role: .destructive) { model.delete(meta.id) }
+        }
+    }
+
     private func beginRename(_ meta: SessionMeta) {
         renameText = meta.title
         renaming = meta
@@ -292,6 +429,7 @@ private struct FolderHeader: View {
     let group: FolderGroup
     let collapsed: Bool
     let toggle: () -> Void
+    @State private var showingAgentPicker = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -302,7 +440,10 @@ private struct FolderHeader: View {
                     Image(systemName: collapsed ? "chevron.right" : "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
-                    Text(group.name).lineLimit(1).help(group.cwd)
+                    Text(group.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                        .help(group.cwd)
                     if group.running > 0 {
                         Text("\(group.running) running")
                             .font(.system(size: 10))
@@ -314,20 +455,34 @@ private struct FolderHeader: View {
             .buttonStyle(.plain)
             .clickCursor()
             Spacer()
-            Menu {
-                ForEach(ProviderId.allCases, id: \.self) { p in
-                    Button(Providers.spec(for: p).label) {
-                        model.createInFolder(provider: p, cwd: group.cwd)
-                    }
-                }
-            } label: {
+            // A popover (not a native Menu) so each agent option is a real SwiftUI
+            // button: it gets the pointing-hand cursor + hover highlight, and clicks
+            // register reliably (native menu rows did neither).
+            Button { showingAgentPicker = true } label: {
                 Image(systemName: "plus")
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
+            .buttonStyle(.plain)
             .help("New session in \(group.cwd)")
             .clickCursor()
+            .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(ProviderId.allCases, id: \.self) { p in
+                        Button {
+                            model.createInFolder(provider: p, cwd: group.cwd)
+                            showingAgentPicker = false
+                        } label: {
+                            Text(Providers.spec(for: p).label)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .clickCursor()
+                    }
+                }
+                .padding(4)
+            }
             FolderIssues(cwd: group.cwd)
             FolderPrs(cwd: group.cwd)
         }
@@ -751,7 +906,7 @@ struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(dotColor).frame(width: 8, height: 8)
+            statusIndicator
             VStack(alignment: .leading, spacing: 1) {
                 Text(meta.title).lineLimit(1).font(.system(size: 13))
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
@@ -789,12 +944,6 @@ struct SessionRow: View {
                     .lineLimit(1)
                     .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
             }
-            if meta.skipPermissions {
-                Image(systemName: "bolt.shield.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.orange)
-                    .help("Accept all (skip permission prompts) is on")
-            }
         }
         .padding(.vertical, 2)
     }
@@ -809,6 +958,25 @@ struct SessionRow: View {
         case .fixing: return .blue
         case .needsDecision: return .orange
         }
+    }
+
+    /// Status glyph in the leading slot. A session awaiting the user's answer to a
+    /// question shows a distinctive question-mark icon instead of the plain dot, so
+    /// "your turn to reply" stands out from the busy/idle dots. Both variants sit in
+    /// a fixed-width slot so row titles stay aligned regardless of which is shown.
+    @ViewBuilder
+    private var statusIndicator: some View {
+        Group {
+            if live, activity == .waitingInput {
+                Image(systemName: "questionmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.yellow)
+                    .help("Waiting for your reply")
+            } else {
+                Circle().fill(dotColor).frame(width: 8, height: 8)
+            }
+        }
+        .frame(width: 12, alignment: .center)
     }
 
     private var dotColor: Color {
@@ -851,27 +1019,12 @@ struct SessionContainer: View {
     @AppStorage("session.sidePanel.shown") private var panelShown: Bool = true
     /// Persisted width of the right-side panel in the split.
     @AppStorage("session.sidePanel.width") private var panelWidth: Double = 420
-    /// Whether the bottom terminal panel is shown. Toggled from the header CTA.
-    @AppStorage("session.bottomPanel.shown") private var bottomShown: Bool = false
     /// Persisted height of the bottom terminal panel in the split.
     @AppStorage("session.bottomPanel.height") private var bottomHeight: Double = 240
 
     private var tab: SidePanelTab {
         get { SidePanelTab(rawValue: tabRaw) ?? .changes }
         nonmutating set { tabRaw = newValue.rawValue }
-    }
-
-    /// Show the queue composer only while the session is live and mid-turn (busy or
-    /// waiting) — when idle the user just types into the terminal — or whenever a
-    /// draft is already buffered (so the "Queued" pill stays visible until it sends).
-    /// Mirrors the web SessionView render condition.
-    private var showMessageQueue: Bool {
-        guard model.isLive(meta.id) else { return false }
-        if model.queuedDraft(meta.id) != nil { return true }
-        switch model.activity(meta.id) {
-        case .busy, .waitingInput: return true
-        default: return false
-        }
     }
 
     var body: some View {
@@ -885,25 +1038,12 @@ struct SessionContainer: View {
                         .foregroundStyle(.secondary)
                         .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
                 }
-                if model.isLive(meta.id) {
-                    acceptAllToggle
-                    Label("live", systemImage: "dot.radiowaves.left.and.right")
-                        .font(.caption).foregroundStyle(.green)
-                } else {
-                    Button("Reactivate") { Task { await model.reactivate(meta.id) } }
-                        .controlSize(.small)
-                        .clickCursor()
-                }
                 Button {
-                    bottomShown.toggle()
-                    // Opening an empty panel for this folder seeds the first terminal.
-                    if bottomShown, model.terminalPanel(meta.cwd).isEmpty {
-                        model.openTerminalTab(cwd: meta.cwd)
-                    }
+                    model.toggleBottomTerminal()
                 } label: {
-                    Image(systemName: bottomShown ? "menubar.dock.rectangle.badge.record" : "menubar.dock.rectangle")
+                    Image(systemName: model.bottomTerminalShown ? "menubar.dock.rectangle.badge.record" : "menubar.dock.rectangle")
                 }
-                .help(bottomShown ? "Hide the terminal panel" : "Show the terminal panel")
+                .help(model.bottomTerminalShown ? "Hide the terminal panel (⌃T)" : "Show the terminal panel (⌃T)")
                 .clickCursor()
                 Button {
                     panelShown.toggle()
@@ -919,11 +1059,7 @@ struct SessionContainer: View {
                 VStack(spacing: 0) {
                     terminal
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if showMessageQueue {
-                        Divider()
-                        MessageQueueComposer(sessionId: meta.id)
-                    }
-                    if bottomShown {
+                    if model.bottomTerminalShown {
                         DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720)
                         BottomTerminalPanel(cwd: meta.cwd)
                             .frame(height: CGFloat(bottomHeight))
@@ -940,6 +1076,12 @@ struct SessionContainer: View {
         }
         .navigationTitle(meta.title)
         .perfTrackBody()
+        // Opening an exited session auto-revives it — no manual "Reactivate" click.
+        // The container is keyed by id in DetailView, so this fires once per open;
+        // `reactivate` no-ops if already live and degrades to replay if it can't resume.
+        .task(id: meta.id) {
+            if !model.isLive(meta.id) { await model.reactivate(meta.id) }
+        }
     }
 
     /// The right-side panel: a Changes | Issues tab switcher hosting the existing
@@ -964,22 +1106,6 @@ struct SessionContainer: View {
         .background(Color.black)
     }
 
-    /// Per-session accept-all switch. Flipping it resume-restarts the CLI at the
-    /// new permission level (conversation + scrollback preserved). Disabled while
-    /// the flip is in flight.
-    private var acceptAllToggle: some View {
-        let flipping = model.flippingPermissions.contains(meta.id)
-        return Toggle("Accept all", isOn: Binding(
-            get: { meta.skipPermissions },
-            set: { skip in Task { await model.setSkipPermissions(meta.id, to: skip) } }
-        ))
-        .toggleStyle(.switch)
-        .controlSize(.small)
-        .font(.caption)
-        .disabled(flipping)
-        .help("Skip permission prompts for this session (restarts the CLI, keeping the conversation)")
-    }
-
     @ViewBuilder
     private var terminal: some View {
         if let session = model.liveSession(meta.id) {
@@ -987,74 +1113,12 @@ struct SessionContainer: View {
             // brand-new Session (same juancode id) behind the same pty, so this
             // forces a fresh terminal that subscribes to the new pty and replays
             // the carried-forward scrollback.
-            SwiftTermLive(session: session)
+            SwiftTermLive(session: session,
+                          focusToken: model.terminalFocusToken,
+                          autoFocusOnAppear: !model.suppressTerminalAutoFocus)
                 .id(ObjectIdentifier(session))
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))
-        }
-    }
-}
-
-/// A small composer for queueing a follow-up instruction while the agent is still
-/// mid-turn (busy or waiting). The draft is buffered in `AppModel.queuedDrafts`
-/// (keyed by session id) and auto-sent on the next idle edge by the activity
-/// subscription — so the user can line up their next message without watching for
-/// the turn to finish. Mirrors the web `MessageQueue`: shows a "Queued" pill with a
-/// Cancel button when something is buffered, otherwise a TextField + Queue button.
-private struct MessageQueueComposer: View {
-    @Environment(AppModel.self) private var model
-    let sessionId: String
-    @State private var draft = ""
-
-    private func submit() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        model.queueDraft(sessionId, text)
-        draft = ""
-    }
-
-    var body: some View {
-        if let queued = model.queuedDraft(sessionId) {
-            HStack(spacing: 8) {
-                Text("Queued")
-                    .font(.system(size: 10, weight: .medium))
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Color.blue.opacity(0.2))
-                    .foregroundStyle(.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
-                Text(queued)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                    .help(queued)
-                Spacer(minLength: 4)
-                Text("sends when the agent is idle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Button {
-                    model.cancelQueuedDraft(sessionId)
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
-                .help("Cancel queued message")
-                .clickCursor()
-            }
-            .padding(.horizontal, 10).padding(.vertical, 6)
-        } else {
-            HStack(spacing: 8) {
-                TextField("Queue a follow-up to send when the agent is done…", text: $draft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
-                    .onSubmit { submit() }
-                Button("Queue") { submit() }
-                    .controlSize(.small)
-                    .font(.system(size: 12))
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help("Buffer this message; it sends automatically when the agent goes idle")
-                    .clickCursor()
-            }
-            .padding(.horizontal, 10).padding(.vertical, 6)
         }
     }
 }

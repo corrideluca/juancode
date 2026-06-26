@@ -30,6 +30,10 @@ final class OracleModel {
     /// The pinned Oracle agent session id, once created/restored.
     var oracleSessionId: String?
 
+    /// Bumped to ask the chat terminal to grab keyboard focus (⌃Space). The chat
+    /// view watches this and makes the terminal first responder on each change.
+    var chatFocusToken = 0
+
     /// Byte offset into `dispatch.jsonl` we've consumed up to. Initialized to the
     /// file's end at bootstrap so we only act on dispatches made this run.
     @ObservationIgnored private var dispatchOffset = 0
@@ -69,6 +73,21 @@ final class OracleModel {
     func toggle() {
         expanded.toggle()
         if expanded { bootstrap(); ensureAgentSession() }
+    }
+
+    /// ⌃Space: open the Oracle on the chat tab with the input focused, so you can
+    /// start typing to Oracle immediately. Toggles closed when the chat is already
+    /// showing. Brings the agent up if it isn't running.
+    func toggleChatFocused() {
+        if expanded && tab == .chat {
+            expanded = false
+            return
+        }
+        expanded = true
+        tab = .chat
+        bootstrap()
+        ensureAgentSession()
+        chatFocusToken += 1
     }
 
     init(app: AppModel) { self.app = app }

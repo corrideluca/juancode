@@ -30,10 +30,12 @@ fi
 
 BIN="$NATIVE/.build/$CONFIG/juancode"
 APP="$NATIVE/.build/juancode.app"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Copy (not symlink) so the running executable's real path is inside the .app —
 # the kernel execs the resolved path, and bundle detection walks up from it.
 cp -f "$BIN" "$APP/Contents/MacOS/juancode"
+# App icon (regenerate with: swift scripts/make-icon.swift).
+[ -f "$NATIVE/AppIcon.icns" ] && cp -f "$NATIVE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,6 +46,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>juancode</string>
   <key>CFBundleIdentifier</key><string>dev.juancode.app</string>
   <key>CFBundleExecutable</key><string>juancode</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>

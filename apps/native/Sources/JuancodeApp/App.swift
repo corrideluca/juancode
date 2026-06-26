@@ -32,6 +32,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        // Set the Dock/app-switcher icon in code: when the binary is exec'd
+        // straight from the terminal (see scripts/dev-app.sh) LaunchServices never
+        // registers the bundle's CFBundleIconFile, so the Info.plist icon alone
+        // leaves a generic Dock tile. Load AppIcon.icns from the bundle Resources.
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL) {
+            NSApp.applicationIconImage = icon
+        }
+
         activityToken = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep],
             reason: "Streaming live terminal sessions")
@@ -130,15 +139,23 @@ struct JuancodeApp: App {
         }
         .commands {
             CommandGroup(after: .newItem) {
-                Button("New Session") { model.showingNewSession = true }
+                // ⌘N clones the selected session's agent + cwd (sheet when nothing
+                // is selected); ⌘⇧N always opens the full New Session sheet.
+                Button("New Session (same agent & folder)") { model.quickNewSession() }
                     .keyboardShortcut("n", modifiers: [.command])
+                Button("New Session…") { model.showingNewSession = true }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
             }
             CommandGroup(after: .toolbar) {
                 Button("Toggle Performance HUD") { PerfMonitor.shared.visible.toggle() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
+                // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
+                // key-equivalent fires even while the SwiftTerm view holds focus.
+                Button("Toggle Terminal") { model.toggleBottomTerminal() }
+                    .keyboardShortcut("t", modifiers: [.control])
                 // Global Oracle + issues access (juancode-6sw). ⌃Space toggles the
                 // Oracle panel from anywhere; ⌘⇧I jumps straight to global issues.
-                Button("Oracle") { oracle.toggle() }
+                Button("Oracle") { oracle.toggleChatFocused() }
                     .keyboardShortcut(.space, modifiers: [.control])
                 Button("Global Issues") { oracle.open(tab: .issues) }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
