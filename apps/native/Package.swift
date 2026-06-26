@@ -84,8 +84,9 @@ let package = Package(
             dependencies: [
                 "JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeServer",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
-                // SPIKE: GhosttyKit (libghostty) GPU-rendered terminal, A/B'd against
-                // SwiftTerm behind JUANCODE_GHOSTTY=1. See GhosttyLive.swift.
+                // SPIKE: GhosttyKit (libghostty) GPU-rendered terminal, the default
+                // live surface; JUANCODE_SWIFTTERM=1 falls back to SwiftTerm for
+                // A/B comparison. See GhosttyLive.swift.
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
             ]
         ),

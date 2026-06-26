@@ -117,10 +117,32 @@ browser/phone clients attach to the identical registry over `/ws`.
 | `AppModel` | observable bridge to the registry/store (sessions, activity, create/reactivate/delete) |
 | `RootView` / `SidebarView` | `NavigationSplitView` sidebar + session detail |
 | `SwiftTermLive` | SwiftTerm `TerminalView` fed by `Session.subscribeOutput` (replay + live); keystrokes/resize → pty |
+| `GhosttyLive` | libghostty (GPU) counterpart of `SwiftTermLive` over the same seam; see *Terminal backend* below |
 | `NewSessionView` | provider + cwd + accept-all + worktree → `registry.create` |
 
-Core shell shipped: sidebar with live activity dots, SwiftTerm session view,
+Core shell shipped: sidebar with live activity dots, session view,
 new-session + reactivate + delete.
+
+### Terminal backend — GhosttyKit spike (`juancode-gq9`)
+
+SwiftTerm 1.13.0 had unreliable resize + render glitches in full-screen TUIs, so
+the live surface was spiked over to **GhosttyKit** (`Lakr233/libghostty-spm`,
+GPU-rendered) behind the existing `SwiftTermLive` seam. The architecture is
+unchanged: *we* still own the pty. libghostty runs as a host-driven backend via
+`InMemoryTerminalSession` — pty output is pushed in with `receive(_:)`, keystrokes
+come back through the `write` callback, and grid changes arrive on the resize
+delegate → our SIGWINCH. Ghostty spawns no process of its own.
+
+`TerminalBackendChoice.useGhostty` picks the backend at every call site
+(`RootView` main session, `OracleDock` chat, `BottomTerminalPanel` shell):
+
+- **default** → `GhosttyLive` / `GhosttyEphemeral` (GhosttyKit)
+- `JUANCODE_SWIFTTERM=1` → `SwiftTermLive` / `SwiftTermEphemeral` (fallback for A/B)
+
+SwiftTerm is retained as the fallback (not retired) until the spike is signed off;
+`EditorOverlay`'s ephemeral pty still runs on SwiftTerm. Both backends build clean
+(`swift build`); the remaining sign-off is visual — confirming glitch-free
+full-screen TUI + resize on a real display.
 
 ### Panels (`juancode-5za`, shipped)
 
