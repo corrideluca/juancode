@@ -43,6 +43,13 @@ struct RootView: View {
                       : "\(model.unhealthySessions.count) session(s) need attention")
                 .foregroundStyle(model.unhealthySessions.isEmpty ? Color.primary : Color.orange)
                 .clickCursor()
+                Button { model.showingRecurringTasks = true } label: {
+                    Label("Recurring Tasks", systemImage: "repeat")
+                }
+                .help(model.recurringTasks.isEmpty
+                      ? "Recurring tasks — scheduled re-runs of a prompt"
+                      : "\(model.recurringTasks.count) recurring task(s) scheduled")
+                .clickCursor()
                 Button { oracle.open(tab: .issues) } label: {
                     Label("Issues", systemImage: "tray.full")
                 }
@@ -69,6 +76,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showingSessionHealth) {
             SessionHealthSheet()
+        }
+        .sheet(isPresented: $model.showingRecurringTasks) {
+            RecurringTasksSheet()
         }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()

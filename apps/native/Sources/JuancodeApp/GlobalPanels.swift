@@ -396,3 +396,224 @@ private struct SessionHealthRow: View {
             .clipShape(Capsule())
     }
 }
+
+// MARK: - Recurring tasks (juancode-46g)
+
+/// Create / manage panel for the recurring-task scheduler (engine from juancode-dgp).
+/// Lets you register a task (folder + agent + prompt + interval), see when each
+/// next fires and last fired, pause/resume, run on demand, and delete. The scheduler
+/// itself lives in `AppModel`; this is purely its surface.
+struct RecurringTasksSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingCreate = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Recurring Tasks").font(.title3).bold()
+                Spacer()
+                Button {
+                    withAnimation { showingCreate.toggle() }
+                } label: {
+                    Label(showingCreate ? "Close" : "New Task",
+                          systemImage: showingCreate ? "xmark" : "plus")
+                }
+                .clickCursor()
+                Button("Done") { dismiss() }.clickCursor()
+            }
+            .padding()
+            Divider()
+            if showingCreate {
+                RecurringTaskCreateForm { showingCreate = false }
+                Divider()
+            }
+            if model.recurringTasksList.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "repeat").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("No recurring tasks.").foregroundStyle(.secondary).font(.system(size: 13))
+                    Text("A recurring task re-runs a prompt in a project on a fixed\ninterval — each run spawns a fresh agent session.")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.recurringTasksList) { task in
+                            RecurringTaskRow(task: task) { dismiss() }
+                            Divider()
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 640, height: 480)
+    }
+}
+
+/// One row in the management list: what/where/how-often plus its schedule status and
+/// the per-task actions (run now, pause/resume, delete).
+private struct RecurringTaskRow: View {
+    @Environment(AppModel.self) private var model
+    let task: RecurringTask
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: task.enabled ? "play.circle.fill" : "pause.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(task.enabled ? Color.green : Color.secondary)
+                Text(task.title).font(.system(size: 13)).lineLimit(1).help(task.title)
+                tag(Providers.spec(for: task.provider).label, .blue)
+                tag("every \(humanInterval(task.intervalSeconds))", .secondary)
+                if !task.enabled { tag("Paused", .orange) }
+                Spacer(minLength: 8)
+                Text((task.cwd as NSString).lastPathComponent)
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .help(task.cwd)
+            }
+            Text(task.prompt).font(.system(size: 11)).foregroundStyle(.secondary)
+                .lineLimit(2).help(task.prompt)
+            HStack(spacing: 12) {
+                Text(scheduleLine).font(.system(size: 10)).foregroundStyle(.tertiary)
+                Spacer()
+                Button("Run now") { dismiss(); Task { await model.runRecurringTaskNow(task.id) } }
+                    .buttonStyle(.borderless).font(.system(size: 11))
+                    .help("Spawn a session for this task right now")
+                    .clickCursor()
+                Button(task.enabled ? "Pause" : "Resume") {
+                    model.setRecurringTaskEnabled(task.id, enabled: !task.enabled)
+                }
+                .buttonStyle(.borderless).font(.system(size: 11)).clickCursor()
+                Button("Delete", role: .destructive) { model.removeRecurringTask(task.id) }
+                    .buttonStyle(.borderless).font(.system(size: 11))
+                    .foregroundStyle(.red).clickCursor()
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    private var scheduleLine: String {
+        let next = task.enabled ? "Next \(relativeTime(task.nextFireAt))" : "Paused"
+        if let last = task.lastFiredAt {
+            return "\(next) · last ran \(relativeTime(last))"
+        }
+        return "\(next) · never run yet"
+    }
+
+    private func tag(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(color.opacity(0.2)).foregroundStyle(color)
+            .clipShape(Capsule())
+    }
+}
+
+/// The inline create form: a title, agent, folder, prompt and interval. Mirrors
+/// `NewSessionView`'s field set but persists a schedule instead of spawning once.
+private struct RecurringTaskCreateForm: View {
+    @Environment(AppModel.self) private var model
+    let done: () -> Void
+
+    @State private var title = ""
+    @State private var provider: ProviderId = .claude
+    @State private var cwd: String = Config.defaultCwd
+    @State private var prompt = ""
+    @State private var amount = 30
+    @State private var unit: IntervalUnit = .minutes
+    @State private var skipPermissions = true
+    @State private var showingDirPicker = false
+
+    private var trimmedPrompt: String { prompt.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canCreate: Bool {
+        !trimmedPrompt.isEmpty && !cwd.trimmingCharacters(in: .whitespaces).isEmpty && amount >= 1
+    }
+
+    var body: some View {
+        Form {
+            TextField("Title (optional)", text: $title)
+            Picker("Agent", selection: $provider) {
+                ForEach(ProviderId.allCases, id: \.self) { p in
+                    Text(Providers.spec(for: p).label).tag(p)
+                }
+            }
+            HStack {
+                TextField("Working directory", text: $cwd)
+                Button("Choose…") { showingDirPicker = true }.clickCursor()
+            }
+            TextField("Prompt", text: $prompt, axis: .vertical)
+                .lineLimit(2...5)
+            HStack {
+                Text("Every")
+                TextField("", value: $amount, format: .number)
+                    .frame(width: 60).multilineTextAlignment(.trailing)
+                Picker("", selection: $unit) {
+                    ForEach(IntervalUnit.allCases, id: \.self) { u in Text(u.label).tag(u) }
+                }
+                .labelsHidden().frame(width: 110)
+                Spacer()
+            }
+            Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
+            HStack {
+                Spacer()
+                Button("Create") { create() }
+                    .disabled(!canCreate).keyboardShortcut(.defaultAction).clickCursor()
+            }
+        }
+        .padding()
+        .fileImporter(isPresented: $showingDirPicker, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result {
+                let needsScope = url.startAccessingSecurityScopedResource()
+                cwd = url.path
+                if needsScope { url.stopAccessingSecurityScopedResource() }
+            }
+        }
+    }
+
+    private func create() {
+        let resolvedTitle = title.trimmingCharacters(in: .whitespaces).isEmpty
+            ? String(trimmedPrompt.prefix(48))
+            : title.trimmingCharacters(in: .whitespaces)
+        model.addRecurringTask(
+            title: resolvedTitle, cwd: cwd, provider: provider, prompt: trimmedPrompt,
+            intervalSeconds: amount * unit.seconds, skipPermissions: skipPermissions)
+        done()
+    }
+}
+
+/// Interval unit for the create form; multiplies the entered amount into seconds.
+private enum IntervalUnit: String, CaseIterable {
+    case minutes, hours, days
+    var label: String { rawValue }
+    var seconds: Int {
+        switch self {
+        case .minutes: return 60
+        case .hours: return 3600
+        case .days: return 86_400
+        }
+    }
+}
+
+/// A coarse "every N units" label for an interval expressed in seconds.
+private func humanInterval(_ seconds: Int) -> String {
+    if seconds % 86_400 == 0, seconds >= 86_400 { return plural(seconds / 86_400, "day") }
+    if seconds % 3600 == 0, seconds >= 3600 { return plural(seconds / 3600, "hour") }
+    if seconds % 60 == 0, seconds >= 60 { return plural(seconds / 60, "min") }
+    return plural(seconds, "sec")
+}
+
+private func plural(_ n: Int, _ unit: String) -> String {
+    "\(n) \(unit)\(n == 1 ? "" : "s")"
+}
+
+/// A relative date string ("in 5 min", "2 hr ago") for a ms-since-epoch timestamp.
+private func relativeTime(_ msEpoch: Int) -> String {
+    let date = Date(timeIntervalSince1970: TimeInterval(msEpoch) / 1000)
+    let fmt = RelativeDateTimeFormatter()
+    fmt.unitsStyle = .abbreviated
+    return fmt.localizedString(for: date, relativeTo: Date())
+}

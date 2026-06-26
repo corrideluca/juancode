@@ -56,6 +56,8 @@ final class AppModel {
     var showingTrackedPrs = false
     /// Session-health panel (juancode-0me pillar 3 / juancode-02k).
     var showingSessionHealth = false
+    /// Recurring-tasks create/manage panel (juancode-46g).
+    var showingRecurringTasks = false
     var errorMessage: String?
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
@@ -974,6 +976,25 @@ final class AppModel {
         recurringTasks[id] = task
         persistRecurringTasks()
         if enabled { startScheduleLoop() }
+    }
+
+    /// Fire a recurring task right now (the "Run now" action), then reschedule its
+    /// next run one interval out from this moment — a manual run shouldn't double up
+    /// with the slot that was already pending. Unlike the scheduler, this *selects*
+    /// the spawned session: a Run-now is an explicit request to see the result.
+    func runRecurringTaskNow(_ id: String) async {
+        guard let task = recurringTasks[id] else { return }
+        _ = await create(provider: task.provider, cwd: task.cwd,
+                         skipPermissions: task.skipPermissions, isolateWorktree: false,
+                         initialInput: task.prompt, select: true)
+        let now = nowMs()
+        if var t = recurringTasks[id] {
+            t.lastFiredAt = now
+            t.nextFireAt = nextRecurringFireTime(
+                firedAt: now, intervalSeconds: t.intervalSeconds, now: now)
+            recurringTasks[id] = t
+            persistRecurringTasks()
+        }
     }
 
     private static let recurringTasksDefaultsKey = "juancode.recurringTasks.v1"
