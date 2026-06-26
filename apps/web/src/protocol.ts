@@ -13,6 +13,27 @@ export type ProviderId = "claude" | "codex";
 export type SessionActivity = "busy" | "idle" | "waiting_input";
 
 /**
+ * Health of a session as judged by the periodic health-check sweep (pillar 3 of
+ * the orchestration loop). `dead`: the pty is gone — either the store reports it
+ * `exited`, or it still says `running` while the live registry no longer holds it
+ * (a crash/desync where `onExit` never fired) — offer reactivation. `stale`: live
+ * and mid-turn (`busy`) but no output for a long time, a likely hung turn. Healthy
+ * sessions are absent from the sweep, so there is no `healthy` member on the wire.
+ */
+export type SessionHealthState = "dead" | "stale";
+
+/**
+ * An unhealthy session the sweep surfaced. `resumable` is carried through so the
+ * UI knows whether to offer "Reactivate" (a dead, resumable session) vs. only a
+ * "Go to" link.
+ */
+export interface SessionHealthReport {
+  id: string;
+  state: SessionHealthState;
+  resumable: boolean;
+}
+
+/**
  * Per-session token usage parsed from the CLI transcript. `inputTokens` is
  * fresh (uncached) input; cache reads/writes tracked separately. `costUsd` is a
  * best-effort estimate (null for Codex / unknown models). See server's
@@ -128,6 +149,12 @@ export type ServerMessage =
    * a question appeared).
    */
   | { type: "activity"; sessionId: string; state: SessionActivity; notify: boolean }
+  /**
+   * The full set of sessions the periodic health-check sweep currently considers
+   * unhealthy (dead / stale). Sent on connect and after every sweep; an empty
+   * array means nothing needs attention. Always the complete set — not a delta.
+   */
+  | { type: "health"; reports: SessionHealthReport[] }
   /** An editor pty was spawned; its id is used as the `sessionId` for I/O. */
   | { type: "editorReady"; editorId: string }
   /**

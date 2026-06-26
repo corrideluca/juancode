@@ -8,6 +8,7 @@ import { notifications } from "../lib/notifications.ts";
 import type { ProviderId, SessionMeta } from "../protocol.ts";
 import { aggregateUsage } from "../lib/usage.ts";
 import { ActivityDot } from "./ActivityDot.tsx";
+import { HealthAlert } from "./HealthAlert.tsx";
 import { FolderPrs } from "./FolderPrs.tsx";
 import { SearchPanel } from "./SearchPanel.tsx";
 import { UsageBadge } from "./UsageBadge.tsx";
@@ -169,6 +170,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         />
       </div>
       <nav className="flex-1 overflow-y-auto">
+        <HealthAlert sessions={sessions.data ?? []} onNavigate={onNavigate} />
         <SearchPanel query={query} />
         {groups.map((g) => (
           <details key={g.cwd} open className="group border-b border-neutral-900">
