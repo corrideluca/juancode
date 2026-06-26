@@ -12,12 +12,17 @@ public final class AppState: @unchecked Sendable {
     public let store: GRDBStore
     public let registry: SessionRegistry
     public let ephemeral = EphemeralPtyRegistry()
+    /// Server-side tracked-PR engine (juancode-bt2) — drives PR tracking over the
+    /// wire for the remote web/phone client, mirroring the GUI's in-process tracking.
+    public let prTracking: PrTrackingEngine
 
     public init(store: GRDBStore) {
         self.store = store
         // The registry's session env carries the real seams: login-shell binary
         // resolution, this store, Codex id discovery, and title/usage polling.
-        self.registry = SessionRegistry(env: .live(store: store))
+        let registry = SessionRegistry(env: .live(store: store))
+        self.registry = registry
+        self.prTracking = PrTrackingEngine(registry: registry, store: store)
         // Any session still "running" in the db is stale — its pty died with the
         // previous process. Mark them exited so the UI shows truth.
         store.markOrphansExited()

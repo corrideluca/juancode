@@ -10,6 +10,7 @@ import type { SpawnOptions } from "./providers.ts";
 import { deriveSessionTitle } from "./sessionTitle.ts";
 import { deriveSessionUsage } from "./sessionUsage.ts";
 import { ActivityDetector } from "./activityDetector.ts";
+import { TranscriptTail } from "./structuredTranscript.ts";
 import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
 import type { ProviderId, SessionActivity, SessionMeta } from "./protocol.ts";
 
@@ -52,6 +53,13 @@ export class Session {
   private readonly exitListeners = new Set<ExitListener>();
   private readonly activityListeners = new Set<ActivityListener>();
   private readonly detector: ActivityDetector;
+  /**
+   * Tails this session's stream-json transcript purely to feed structured
+   * activity pulses into {@link detector} (the preferred, wording-independent
+   * busy/idle signal). Independent of the client-facing structured *view* tail
+   * in `ws.ts`, which is per-subscriber and may not exist. Started once spawned.
+   */
+  private readonly activityTail: TranscriptTail;
   private persistTimer: NodeJS.Timeout | null = null;
   private titleTimer: NodeJS.Timeout | null = null;
 
@@ -67,6 +75,20 @@ export class Session {
     this.detector = new ActivityDetector(cols, rows, (state, notify) => {
       for (const l of this.activityListeners) l(state, notify);
     });
+    // Preferred activity signal: pulse the detector busy on each batch of agent
+    // records the CLI appends to its transcript. The id is read via a getter so
+    // Codex (which discovers its id after spawn) starts tailing once it lands.
+    this.activityTail = new TranscriptTail(
+      meta.provider,
+      () => this.meta.cliSessionId,
+      (events, reset) => {
+        // Skip the initial backlog: on a resumed session it replays the prior
+        // conversation's agent records, which would spuriously pulse busy (and
+        // then a phantom "turn finished" notification) at startup. Only newly
+        // appended records reflect the live turn.
+        if (!reset) this.detector.feedStructured(events);
+      },
+    );
     // Resuming an exited session carries its prior scrollback forward so the
     // history survives the new pty (and isn't clobbered by the persist below).
     this.scrollback = new Scrollback(SCROLLBACK_LIMIT, seedScrollback);
@@ -101,6 +123,7 @@ export class Session {
       this.meta.exitCode = exitCode;
       this.meta.updatedAt = Date.now();
       this.detector.reset();
+      this.activityTail.stop();
       this.stopTitleWatch();
       void this.refreshTitle(); // one last read to catch a late-generated title
       void this.refreshUsage(); // and the final turn's token usage
@@ -110,6 +133,8 @@ export class Session {
 
     // Keep the title in sync with the CLI's own generated summary / first prompt.
     this.startTitleWatch();
+    // Tail the transcript for structured activity pulses (see activityTail).
+    this.activityTail.start();
   }
 
   /** Start a brand-new conversation. */
@@ -302,6 +327,7 @@ export class Session {
 
   kill(): void {
     this.stopTitleWatch();
+    this.activityTail.stop();
     if (this.isRunning) this.proc.kill();
   }
 

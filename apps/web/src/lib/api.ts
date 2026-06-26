@@ -13,6 +13,7 @@ import type {
   PushResult,
   ReviewResult,
   SessionMeta,
+  TrackedPrInfo,
   Worktree,
 } from "../protocol.ts";
 
@@ -131,6 +132,8 @@ export const api = {
     return getJson<DirListing>(`/api/dirs${qs ? `?${qs}` : ""}`);
   },
   prs: (cwd: string) => getJson<PrListResult>(`/api/prs?cwd=${encodeURIComponent(cwd)}`),
+  /** Tracked-PR registry snapshot (the live surface is the WS `subscribeTrackedPrs`). */
+  trackedPrs: () => getJson<TrackedPrInfo[]>("/api/tracked-prs"),
   diff: (id: string, cwd?: string) =>
     getJson<DiffResult>(`/api/sessions/${id}/diff${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`),
   worktrees: (id: string) => getJson<Worktree[]>(`/api/sessions/${id}/worktrees`),

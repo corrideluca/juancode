@@ -72,6 +72,11 @@ final class AppModel {
     var showingSessionHealth = false
     /// Recurring-tasks create/manage panel (juancode-46g).
     var showingRecurringTasks = false
+    /// ⌘K prompt-template palette (juancode-2vd): quick-insert saved prompts.
+    var showingPromptPalette = false
+    /// Saved prompt templates, loaded from `UserDefaults` on launch. Mutated through
+    /// `addTemplate`/`updateTemplate`/`deleteTemplate`, which persist on every change.
+    var promptTemplates: [PromptTemplate] = []
     var errorMessage: String?
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
@@ -94,6 +99,7 @@ final class AppModel {
         refresh()
         restoreTracked()
         restoreRecurringTasks()
+        restorePromptTemplates()
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on.
@@ -1149,6 +1155,98 @@ final class AppModel {
               let list = try? JSONDecoder().decode([RecurringTask].self, from: data) else { return }
         for task in list { recurringTasks[task.id] = task }
         if recurringTasks.values.contains(where: \.enabled) { startScheduleLoop() }
+    }
+
+    // MARK: - Prompt templates (juancode-2vd)
+    //
+    // Saved, reusable prompts surfaced through the ⌘K palette. Persisted to
+    // UserDefaults as a JSON-encoded array (mirroring tracked PRs / recurring
+    // tasks). CRUD goes through the helpers below, each of which re-persists; the
+    // palette UI binds to `promptTemplates` and calls insert/submit.
+
+    private static let promptTemplatesDefaultsKey = "juancode.promptTemplates.v1"
+
+    private func persistPromptTemplates() {
+        if let data = try? JSONEncoder().encode(promptTemplates) {
+            UserDefaults.standard.set(data, forKey: Self.promptTemplatesDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.promptTemplatesDefaultsKey)
+        }
+    }
+
+    private func restorePromptTemplates() {
+        guard let data = UserDefaults.standard.data(forKey: Self.promptTemplatesDefaultsKey),
+              let list = try? JSONDecoder().decode([PromptTemplate].self, from: data) else { return }
+        promptTemplates = list
+    }
+
+    /// Create a new template and persist. Returns the stored value.
+    @discardableResult
+    func addTemplate(title: String, body: String) -> PromptTemplate {
+        let now = nowMs()
+        let t = PromptTemplate(title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                               body: body, createdAt: now, updatedAt: now)
+        promptTemplates.append(t)
+        persistPromptTemplates()
+        return t
+    }
+
+    /// Edit an existing template's title/body in place (bumps `updatedAt`) and persist.
+    func updateTemplate(_ id: String, title: String, body: String) {
+        guard let i = promptTemplates.firstIndex(where: { $0.id == id }) else { return }
+        promptTemplates[i].title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        promptTemplates[i].body = body
+        promptTemplates[i].updatedAt = nowMs()
+        persistPromptTemplates()
+    }
+
+    func deleteTemplate(_ id: String) {
+        promptTemplates.removeAll { $0.id == id }
+        persistPromptTemplates()
+    }
+
+    /// The folder the palette acts in: the selected session's cwd, else the default.
+    private var promptPaletteCwd: String {
+        if let sel = selection,
+           let meta = (sessions + externalSessions).first(where: { $0.id == sel }) {
+            return meta.cwd
+        }
+        return Config.defaultCwd
+    }
+
+    /// Insert a template's body into the active session's composer without sending,
+    /// so the user can tweak it first. Falls back to seeding a fresh Claude session
+    /// when the current folder has no live session (mirrors `workOnIssue`).
+    func insertTemplate(_ template: PromptTemplate) {
+        applyTemplate(template, submit: false)
+    }
+
+    /// Insert a template's body and submit it immediately.
+    func submitTemplate(_ template: PromptTemplate) {
+        applyTemplate(template, submit: true)
+    }
+
+    /// Shared insert/submit path. A live session in the resolved folder receives the
+    /// body (pasted, optionally with the submitting Enter); otherwise a fresh Claude
+    /// session is spawned, seeded with the prompt as its initial input.
+    private func applyTemplate(_ template: PromptTemplate, submit: Bool) {
+        let body = template.body
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let cwd = promptPaletteCwd
+        if let session = focusedLiveSession(in: cwd) {
+            if submit { session.submit(body) } else { session.insert(body) }
+            selection = session.id
+            terminalFocusToken += 1
+            return
+        }
+        // No live session in this folder — seed a fresh Claude session with the
+        // prompt as its initial input. A brand-new session has no composer to
+        // insert-without-sending into, so this path always submits (matches
+        // `workOnIssue`'s fallback).
+        Task {
+            await create(provider: .claude, cwd: cwd, skipPermissions: true,
+                         isolateWorktree: false, initialInput: body)
+        }
     }
 
     private func startScheduleLoop() {

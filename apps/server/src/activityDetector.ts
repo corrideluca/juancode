@@ -1,36 +1,46 @@
-import type { SessionActivity } from "./protocol.ts";
+import type { SessionActivity, StructuredEvent } from "./protocol.ts";
 import { TerminalScreen } from "./terminalScreen.ts";
 
 /**
  * Infers whether an agent session is working, has finished a turn, or is waiting
- * for the user — from the raw pty byte stream alone (we never reimplement the
- * agents, so this is all we have).
+ * for the user. There are two signals, and the detector fuses them:
  *
- * The stream is fed into a headless {@link TerminalScreen}, so the detector reads
- * the *actual rendered screen* rather than a flattened byte tail. Both `claude`
- * and `codex` paint an "esc to interrupt" footer once when a turn starts and then
- * only update the changing bits (the elapsed-time counter, token counts) via
- * cursor moves — the phrase itself is not re-emitted every frame. A concatenated
- * tail therefore can't tell whether the footer is still on screen, which is the
- * whole question; the grid can, because the footer occupies real cells until the
- * CLI erases them at turn end. So:
+ * 1. **Structured stream** (preferred). The CLIs write an append-only
+ *    stream-json transcript as they run; new records appear *only* while the
+ *    agent is actively producing a turn (an `assistant` / `thinking` / `tool_use`
+ *    / `tool_result` block). {@link Session} tails that transcript and calls
+ *    {@link feedStructured} with each batch of normalized events. A batch that
+ *    carries any agent-produced event is an unambiguous "the agent is working"
+ *    pulse that does not depend on rendered TUI wording at all — robust to CLI
+ *    footer/spinner copy changes. This is the headline of juancode-doq.
  *
- * - **busy** while the working footer is visible in the current frame.
- * - on a brief quiet period we re-read the screen: footer gone + an option menu /
- *   yes-no prompt visible => **waiting_input**; footer gone + nothing => **idle**.
- * - a longer watchdog demotes a stuck **busy** if the footer somehow lingers but
- *   the spinner has stopped emitting (the timer repaints ~1/s while truly busy,
- *   so prolonged total silence means the turn really ended).
+ * 2. **Rendered PTY screen** (fallback). The raw pty byte stream is fed into a
+ *    headless {@link TerminalScreen}, so the detector can read the *actual
+ *    rendered screen*. Both `claude` and `codex` paint an "esc to interrupt"
+ *    footer while a turn runs and an option-menu / yes-no prompt when they pause
+ *    for the user. This path still drives **busy** when no transcript is
+ *    available (e.g. before the CLI session id is known, or a provider/mode that
+ *    writes no transcript), and — crucially — it is what distinguishes
+ *    **waiting_input** from **idle** at turn end, since a permission prompt is
+ *    *not* written to the transcript until the user answers it.
  *
- * Because a session can only become busy via the footer phrase, the startup
- * banner and the user's own keystroke echoes — which never contain it — are never
- * mistaken for agent activity. Best-effort: a CLI wording change can defeat the
- * footer / prompt patterns.
+ * In both cases the lifecycle is the same: a busy pulse (re)arms a short settle
+ * timer and a long watchdog. On settle we re-read the rendered screen — an
+ * option menu / yes-no prompt visible => **waiting_input**, otherwise **idle**
+ * (unless the working footer is still up *and* we have no structured turn-end
+ * yet, in which case we stay busy). The watchdog demotes a stuck busy if both
+ * streams go silent.
+ *
+ * Because busy is only ever entered via a working footer or a structured agent
+ * event, the startup banner and the user's own keystroke echoes — which carry
+ * neither — are never mistaken for agent activity. Best-effort: with no
+ * transcript, a CLI footer-wording change can still defeat the screen patterns,
+ * which is exactly why the structured path exists.
  */
 
-/** Quiet period after output stops before we re-classify the screen. */
+/** Quiet period after a busy pulse before we re-classify the screen. */
 const SETTLE_MS = 250;
-/** Longer silence after which a still-"busy" footer is treated as stale. */
+/** Longer silence after which a still-"busy" session is treated as stale. */
 const WATCHDOG_MS = 8000;
 
 /** The "esc to interrupt" working line, tolerant of wording ("Esc again to…"). */
@@ -53,6 +63,25 @@ const PROMPT_RES: readonly RegExp[] = [
   /\bAllow\b[^\n]{0,40}\?/i,
 ];
 
+/**
+ * Structured-event kinds that mean the agent is actively producing a turn. A
+ * `user` record is the user's own prompt landing — also a turn boundary, but it
+ * doesn't by itself mean the agent is working, so it is excluded here (the
+ * agent's first `assistant`/`thinking`/`tool_use` record that follows is the
+ * busy pulse).
+ */
+const AGENT_EVENT_KINDS: ReadonlySet<StructuredEvent["kind"]> = new Set([
+  "assistant",
+  "thinking",
+  "tool_use",
+  "tool_result",
+]);
+
+/** True when a batch of normalized events contains an agent-produced record. */
+export function batchHasAgentActivity(events: readonly StructuredEvent[]): boolean {
+  return events.some((e) => AGENT_EVENT_KINDS.has(e.kind));
+}
+
 type ChangeListener = (state: SessionActivity, notify: boolean) => void;
 
 export class ActivityDetector {
@@ -60,6 +89,14 @@ export class ActivityDetector {
   private readonly screen: TerminalScreen;
   private settleTimer: NodeJS.Timeout | null = null;
   private watchdogTimer: NodeJS.Timeout | null = null;
+  /**
+   * Whether the *current* busy turn was started by a structured agent event.
+   * When true we don't keep the turn busy just because the footer regex still
+   * matches — the transcript is authoritative, so settle classifies on the
+   * screen's prompt/quiet state instead of waiting for the footer to be erased.
+   * Reset whenever we leave busy.
+   */
+  private structuredTurn = false;
 
   constructor(
     cols: number,
@@ -69,7 +106,7 @@ export class ActivityDetector {
     this.screen = new TerminalScreen(cols, rows);
   }
 
-  /** Feed a chunk of raw pty output. */
+  /** Feed a chunk of raw pty output (the screen / fallback signal). */
   feed(data: string): void {
     // The screen must see every byte to stay an accurate mirror.
     this.screen.feed(data);
@@ -80,12 +117,29 @@ export class ActivityDetector {
       // Cheap gate: only a frame that could carry the working footer is worth
       // re-reading the screen for. If the footer is now visible we go busy.
       if (WORKING_RE.test(this.normalizedScreen())) {
+        this.structuredTurn = false;
         this.transition("busy", false);
         this.armTimers();
       }
     }
     // Idle with no possible footer: nothing to do (don't reclassify idle output
     // into waiting_input — active states are only entered via a working turn).
+  }
+
+  /**
+   * Feed a batch of normalized structured events from the session's transcript
+   * tail (the preferred signal). A batch carrying an agent-produced record is a
+   * wording-independent "the agent is working" pulse: it enters/keeps busy and
+   * (re)arms the settle/watchdog clocks exactly like footer output does.
+   */
+  feedStructured(events: readonly StructuredEvent[]): void {
+    if (!batchHasAgentActivity(events)) return;
+    // A structured pulse is authoritative for this turn, whether it starts the
+    // turn or upgrades one the screen path already opened (so settle no longer
+    // waits on the footer being erased).
+    this.structuredTurn = true;
+    if (this.state !== "busy") this.transition("busy", false);
+    this.armTimers();
   }
 
   get activity(): SessionActivity {
@@ -117,6 +171,7 @@ export class ActivityDetector {
   /** The session ended — cancel any pending timers and return to idle. */
   reset(): void {
     this.clearTimers();
+    this.structuredTurn = false;
     this.transition("idle", false);
   }
 
@@ -136,14 +191,19 @@ export class ActivityDetector {
   /**
    * Re-read the screen and classify. Only meaningful while busy: it ends a turn.
    * `demoteStaleFooter` (the watchdog path) ignores a lingering footer and settles
-   * anyway, so we never hang on busy after the spinner has gone silent.
+   * anyway, so we never hang on busy after both streams have gone silent.
+   *
+   * The footer regex only *holds* a turn busy when the turn was driven by the
+   * screen path (no structured signal). A structured turn settles on the screen's
+   * prompt/quiet state directly: the transcript already told us the agent stopped
+   * emitting, so a footer the CLI hasn't repainted yet must not pin us busy.
    */
   private settle(demoteStaleFooter: boolean): void {
     if (this.state !== "busy") return;
     const text = this.normalizedScreen();
     let next: SessionActivity;
-    if (!demoteStaleFooter && WORKING_RE.test(text)) {
-      next = "busy"; // still working — leave it
+    if (!demoteStaleFooter && !this.structuredTurn && WORKING_RE.test(text)) {
+      next = "busy"; // still working (screen path) — leave it
     } else {
       next = PROMPT_RES.some((re) => re.test(text)) ? "waiting_input" : "idle";
     }
@@ -154,6 +214,7 @@ export class ActivityDetector {
   private transition(state: SessionActivity, notify: boolean): void {
     if (state === this.state) return;
     this.state = state;
+    if (state !== "busy") this.structuredTurn = false;
     this.onChange(state, notify);
   }
 

@@ -316,6 +316,30 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        // ── BEGIN shell-terminal persistence (ticket juancode-iwi) — additive ──
+        case "reattachTerminal": {
+          const sh = terminals.get(msg.terminalId);
+          if (!sh || !sh.isAlive) {
+            // The pty is gone (shell exited / server restarted) — tell the client
+            // so it can drop the dead pane rather than wait forever for output.
+            send({ type: "exit", sessionId: msg.terminalId, exitCode: null });
+            return;
+          }
+          // This connection owns the terminal's lifetime again (it may be a
+          // different ws than the one that opened it, e.g. after a reconnect).
+          openedTerminals.add(sh.id);
+          sh.resize(msg.cols, msg.rows);
+          subscribe(sh.id);
+          send({
+            type: "terminalReattached",
+            terminalId: sh.id,
+            requestId: msg.requestId,
+            scrollback: sh.getScrollback(),
+          });
+          return;
+        }
+        // ── END shell-terminal persistence ─────────────────────────────────────
+
         case "subscribeStructured": {
           subscribeStructured(msg.sessionId);
           return;

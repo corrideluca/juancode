@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
+import { SCROLLBACK_LIMIT } from "./config.ts";
+import { Scrollback } from "./scrollback.ts";
 
 type OutputListener = (data: string) => void;
 type ExitListener = (exitCode: number | null) => void;
@@ -19,10 +21,17 @@ function shellCommand(): { cmd: string; args: string[] } {
  * and unlike a Session it is never persisted, titled, or resumed — it lives
  * only while its pane is open, so the shell loads the user's real config and
  * env exactly as a normal terminal would. This is the integrated terminal.
+ *
+ * Unlike an editor pty it captures a capped {@link Scrollback} of its output —
+ * the same mechanism a persisted {@link Session} uses — so a pane that survives a
+ * session switch (the pty is kept alive while its xterm is torn down) can be
+ * re-attached and have its history replayed via `reattachTerminal`. The buffer is
+ * in-memory only: shell terminals are never persisted across server restarts.
  */
 export class ShellPty {
   readonly id = randomUUID();
   private readonly proc: pty.IPty;
+  private readonly scrollback = new Scrollback(SCROLLBACK_LIMIT);
   private readonly outputListeners = new Set<OutputListener>();
   private readonly exitListeners = new Set<ExitListener>();
   private alive = true;
@@ -38,12 +47,22 @@ export class ShellPty {
       env: process.env as Record<string, string>,
     });
     this.proc.onData((data) => {
+      this.scrollback.append(data);
       for (const l of this.outputListeners) l(data);
     });
     this.proc.onExit(({ exitCode }) => {
       this.alive = false;
       for (const l of this.exitListeners) l(exitCode);
     });
+  }
+
+  /** Captured output to replay into a freshly re-attached xterm. */
+  getScrollback(): string {
+    return this.scrollback.replay;
+  }
+
+  get isAlive(): boolean {
+    return this.alive;
   }
 
   write(data: string): void {

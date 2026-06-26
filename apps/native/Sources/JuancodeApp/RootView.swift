@@ -92,6 +92,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()
         }
+        .sheet(isPresented: $model.showingPromptPalette) {
+            PromptPaletteView()
+        }
         .alert("Error", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }

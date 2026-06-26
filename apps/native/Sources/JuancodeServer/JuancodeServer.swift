@@ -194,6 +194,13 @@ public enum JuancodeServer {
             return await getOpenPrs(cwd)
         }
 
+        // Tracked-PR registry snapshot (juancode-bt2). The live surface is the WS
+        // `subscribeTrackedPrs`/`trackedPrs` pair; this gives the remote client an
+        // initial list for TanStack Query without opening the socket first.
+        router.get("/api/tracked-prs") { _, _ in
+            jsonResponse(await state.prTracking.list().map(TrackedPrWire.init))
+        }
+
         router.get("/api/sessions/:id/beads") { _, ctx in
             let m = try meta(ctx, store)
             return await getBeads(m.cwd)

@@ -167,6 +167,19 @@ export type ClientMessage =
    * input/resize/kill/output/exit address the pty by its `terminalId`.
    */
   | { type: "openTerminal"; cwd: string; cols: number; rows: number; requestId: string }
+  // ── BEGIN shell-terminal persistence (ticket juancode-iwi) — additive ────────
+  /**
+   * Re-attach to a shell pty that is still alive server-side (its `terminalId`
+   * was learned from an earlier `terminalReady`). Used when the integrated
+   * terminal's xterm was torn down — e.g. the panel's React tree remounted on a
+   * session switch — but the pty itself was kept running. The server re-subscribes
+   * this connection and replies with `terminalReattached` carrying the captured
+   * shell scrollback so the fresh xterm can replay it. `requestId` routes the
+   * reply to the pane that asked. If the pty is gone the server replies with
+   * `exit` for `terminalId` instead.
+   */
+  | { type: "reattachTerminal"; terminalId: string; cols: number; rows: number; requestId: string }
+  // ── END shell-terminal persistence ───────────────────────────────────────────
   /**
    * Opt into the structured (message/tool-bubble) view of a session — the server
    * tails the session's stream-json transcript and pushes `structured` messages.
@@ -174,7 +187,25 @@ export type ClientMessage =
    */
   | { type: "subscribeStructured"; sessionId: string }
   /** Stop the structured tail for a session (the client closed that view). */
-  | { type: "unsubscribeStructured"; sessionId: string };
+  | { type: "unsubscribeStructured"; sessionId: string }
+  // ── BEGIN tracked-PR registry (ticket juancode-bt2) — additive ───────────────
+  /**
+   * Subscribe to the tracked-PR registry. The server replies with the current
+   * `trackedPrs` snapshot and pushes further updates + per-escalation
+   * `trackNotification`s until the connection closes.
+   */
+  | { type: "subscribeTrackedPrs" }
+  /**
+   * Start tracking `pr` in `cwd`: the server spawns a dedicated agent session
+   * seeded with the PR context + auto-fix-vs-escalate contract and polls it.
+   * No-op if already tracked.
+   */
+  | { type: "trackPr"; cwd: string; pr: PullRequest }
+  /** Stop tracking the PR `trackedId` (its agent session is left alone). */
+  | { type: "untrackPr"; trackedId: string }
+  /** Dismiss a surfaced needs-decision notification. */
+  | { type: "resolveTrackNotification"; trackedId: string; notificationId: string };
+  // ── END tracked-PR registry ──────────────────────────────────────────────────
 
 export type ServerMessage =
   | { type: "created"; session: SessionMeta }
@@ -202,6 +233,14 @@ export type ServerMessage =
    * route the reply to the pane that asked for it.
    */
   | { type: "terminalReady"; terminalId: string; requestId: string }
+  // ── BEGIN shell-terminal persistence (ticket juancode-iwi) — additive ────────
+  /**
+   * Reply to `reattachTerminal` for a still-alive shell pty: `scrollback` is the
+   * pty's captured output to replay into the freshly-mounted xterm. `requestId`
+   * echoes the request so the client routes it to the right pane.
+   */
+  | { type: "terminalReattached"; terminalId: string; requestId: string; scrollback: string }
+  // ── END shell-terminal persistence ───────────────────────────────────────────
   /**
    * A batch of structured-view events. `reset` is true on the first message
    * after `subscribeStructured` (full backlog — replace the list); later
@@ -211,7 +250,19 @@ export type ServerMessage =
   | { type: "structured"; sessionId: string; events: StructuredEvent[]; reset: boolean }
   /** A reactivate couldn't be honoured: no prior CLI conversation to resume. */
   | { type: "unresumable"; sessionId: string; reason: string }
-  | { type: "error"; sessionId?: string; message: string };
+  | { type: "error"; sessionId?: string; message: string }
+  // ── BEGIN tracked-PR registry (ticket juancode-bt2) — additive ───────────────
+  /**
+   * The full tracked-PR watch list — sent on `subscribeTrackedPrs` and after every
+   * change/poll. Always the complete set, not a delta — replace wholesale.
+   */
+  | { type: "trackedPrs"; tracked: TrackedPrInfo[] }
+  /**
+   * A single needs-decision escalation fired for a tracked PR — a ping the client
+   * can alert on without diffing the list (also reflected in the next snapshot).
+   */
+  | { type: "trackNotification"; trackedId: string; prNumber: number; notification: TrackNotification };
+  // ── END tracked-PR registry ──────────────────────────────────────────────────
 
 // ── REST data types (diff viewer + inline review comments) ───────────────────
 
@@ -356,6 +407,46 @@ export interface PrListResult {
   /** Why PRs are unavailable (gh missing / not authed / not a repo / no remote). */
   error?: string;
 }
+
+// ── BEGIN tracked-PR registry data types (ticket juancode-bt2) — additive ────
+
+/**
+ * Badge state of a tracked PR: `watching` (CI green / nothing outstanding),
+ * `fixing` (CI red/running or new comments just handed to the agent),
+ * `needs_decision` (a change needs the user — not auto-applied).
+ */
+export type TrackState = "watching" | "fixing" | "needs_decision";
+
+/** A surfaced decision the agent should not make autonomously. */
+export interface TrackNotification {
+  id: string;
+  prNumber: number;
+  message: string;
+  /** Epoch ms when it was raised. */
+  createdAt: number;
+}
+
+/**
+ * One PR under continuous watch. `id` is the stable `cwd#number` key used by
+ * `untrackPr` / `resolveTrackNotification`; `sessionId` is the agent session
+ * driving its fixes; `state`/`checks` drive the badge.
+ */
+export interface TrackedPrInfo {
+  id: string;
+  number: number;
+  title: string;
+  branch: string;
+  url: string;
+  cwd: string;
+  sessionId: string;
+  state: TrackState;
+  checks: PrChecks;
+  notifications: TrackNotification[];
+  /** Epoch ms of the last successful poll, or null before the first. */
+  lastPolledAt: number | null;
+}
+
+// ── END tracked-PR registry data types ───────────────────────────────────────
 
 // ── REST data types (git actions: commit / push / create PR) ─────────────────
 

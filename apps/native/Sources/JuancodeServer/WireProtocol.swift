@@ -1,5 +1,6 @@
 import Foundation
 import JuancodeCore
+import JuancodeServices
 
 /// The WebSocket wire protocol, a faithful Codable mirror of the `ClientMessage`
 /// / `ServerMessage` tagged unions in `apps/server/src/protocol.ts` (and its twin
@@ -26,12 +27,24 @@ public enum ClientMessage: Sendable {
     case kill(sessionId: String)
     case openEditor(cwd: String, file: String, cols: Int, rows: Int)
     case openTerminal(cwd: String, cols: Int, rows: Int, requestId: String)
+    // ── Tracked-PR registry (juancode-bt2) — keep beside the PR server messages ──
+    /// Subscribe to the tracked-PR registry; the server replies with the current
+    /// `trackedPrs` snapshot and pushes further updates as they happen.
+    case subscribeTrackedPrs
+    /// Start tracking `pr` in `cwd` (spawns its driving agent session server-side).
+    case trackPr(cwd: String, pr: PullRequest)
+    /// Stop tracking the PR whose `TrackedPr.key` is `trackedId`.
+    case untrackPr(trackedId: String)
+    /// Dismiss a surfaced needs-decision notification.
+    case resolveTrackNotification(trackedId: String, notificationId: String)
 }
 
 extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
         case sessionId, data, file, requestId, cliSessionId, startMs
+        // Tracked-PR registry (juancode-bt2).
+        case pr, trackedId, notificationId
     }
 
     public init(from decoder: Decoder) throws {
@@ -87,6 +100,16 @@ extension ClientMessage: Decodable {
                                  cols: try c.decode(Int.self, forKey: .cols),
                                  rows: try c.decode(Int.self, forKey: .rows),
                                  requestId: try c.decode(String.self, forKey: .requestId))
+        case "subscribeTrackedPrs":
+            self = .subscribeTrackedPrs
+        case "trackPr":
+            self = .trackPr(cwd: try c.decode(String.self, forKey: .cwd),
+                            pr: try c.decode(PullRequest.self, forKey: .pr))
+        case "untrackPr":
+            self = .untrackPr(trackedId: try c.decode(String.self, forKey: .trackedId))
+        case "resolveTrackNotification":
+            self = .resolveTrackNotification(trackedId: try c.decode(String.self, forKey: .trackedId),
+                                             notificationId: try c.decode(String.self, forKey: .notificationId))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "Unknown client message type: \(type)")
@@ -106,12 +129,51 @@ public enum ServerMessage: Sendable {
     case terminalReady(terminalId: String, requestId: String)
     case unresumable(sessionId: String, reason: String)
     case error(sessionId: String?, message: String)
+    // ── Tracked-PR registry (juancode-bt2) — keep beside the PR REST types ───────
+    /// The full tracked-PR watch list — sent on `subscribeTrackedPrs` and after
+    /// every change/poll. Always the complete set, replace wholesale.
+    case trackedPrs(tracked: [TrackedPr])
+    /// A single needs-decision escalation fired for a tracked PR (the agent should
+    /// NOT auto-apply it) — a ping the client can alert on without diffing the list.
+    case trackNotification(trackedId: String, prNumber: Int, notification: TrackNotification)
+}
+
+/// Wire shape of a tracked PR (juancode-bt2). A hand-built mirror of `TrackedPr`
+/// reduced to what the remote client needs, encoding the badge `state` and
+/// notifications explicitly so the JSON matches `TrackedPrInfo` in the protocol.ts
+/// twins byte-for-byte (notably `state: "needs_decision"`, snake-cased on the wire,
+/// vs. Swift's `TrackState.needsDecision`).
+struct TrackedPrWire: Encodable {
+    let id: String
+    let number: Int
+    let title: String
+    let branch: String
+    let url: String
+    let cwd: String
+    let sessionId: String
+    let state: String
+    let checks: PrChecks
+    let notifications: [TrackNotification]
+    let lastPolledAt: Int?
+
+    init(_ p: TrackedPr) {
+        id = p.id; number = p.number; title = p.title; branch = p.branch; url = p.url
+        cwd = p.cwd; sessionId = p.sessionId; checks = p.snapshot.checks
+        notifications = p.notifications; lastPolledAt = p.lastPolledAt
+        switch p.state {
+        case .watching: state = "watching"
+        case .fixing: state = "fixing"
+        case .needsDecision: state = "needs_decision"
+        }
+    }
 }
 
 extension ServerMessage: Encodable {
     private enum K: String, CodingKey {
         case type, session, sessionId, scrollback, data, exitCode, state, notify
         case editorId, terminalId, requestId, reason, message
+        // Tracked-PR registry (juancode-bt2).
+        case tracked, trackedId, prNumber, notification
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -156,6 +218,14 @@ extension ServerMessage: Encodable {
             // `sessionId?` is optional in the TS — omit when nil.
             try c.encodeIfPresent(sessionId, forKey: .sessionId)
             try c.encode(message, forKey: .message)
+        case let .trackedPrs(tracked):
+            try c.encode("trackedPrs", forKey: .type)
+            try c.encode(tracked.map(TrackedPrWire.init), forKey: .tracked)
+        case let .trackNotification(trackedId, prNumber, notification):
+            try c.encode("trackNotification", forKey: .type)
+            try c.encode(trackedId, forKey: .trackedId)
+            try c.encode(prNumber, forKey: .prNumber)
+            try c.encode(notification, forKey: .notification)
         }
     }
 

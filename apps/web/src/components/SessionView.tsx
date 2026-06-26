@@ -12,6 +12,7 @@ import { MessageQueue } from "./MessageQueue.tsx";
 import { StructuredView } from "./StructuredView.tsx";
 import { Terminal } from "./Terminal.tsx";
 import { TerminalPanel } from "./TerminalPanel.tsx";
+import { toggleTerminalOpen, useTerminalOpen, setTerminalOpen } from "../lib/terminalStore.ts";
 import { UsageBadge } from "./UsageBadge.tsx";
 
 /** Which auxiliary view, if any, is open in the collapsible right panel. */
@@ -44,7 +45,11 @@ export function SessionView({ id }: { id: string }) {
   const meta = sessions.data?.find((s) => s.id === id);
   const [side, setSide] = useState<SidePanel>(null);
   // The integrated shell-terminal panel splits the bottom of the session view.
-  const [showTerminal, setShowTerminal] = useState(false);
+  // Its open/closed state (and the live shells themselves) live in a module store
+  // keyed by session id, so the terminals — and their scrollback — survive
+  // navigating to another session and back (VS Code-style), rather than being
+  // torn down with this per-session view on every switch.
+  const showTerminal = useTerminalOpen(id);
   // How the agent's output is rendered: the raw xterm/ANSI TUI (default) or the
   // opt-in structured message/tool-bubble view fed by the stream-json transcript.
   const [renderMode, setRenderMode] = useState<"terminal" | "structured">("terminal");
@@ -332,7 +337,7 @@ export function SessionView({ id }: { id: string }) {
             </button>
           ))}
           <button
-            onClick={() => setShowTerminal((v) => !v)}
+            onClick={() => toggleTerminalOpen(id)}
             className={`rounded-md px-2.5 py-1 transition-colors ${
               showTerminal
                 ? "bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
@@ -490,7 +495,7 @@ export function SessionView({ id }: { id: string }) {
             <>
               <PanelResizeHandle className="relative h-px bg-neutral-800 transition-colors after:absolute after:-top-1 after:h-2 after:w-full hover:bg-neutral-600 data-[resize-handle-state=drag]:bg-neutral-500" />
               <Panel order={2} defaultSize={35} minSize={10} className="overflow-hidden">
-                <TerminalPanel key={id} cwd={meta.cwd} onClose={() => setShowTerminal(false)} />
+                <TerminalPanel sessionId={id} cwd={meta.cwd} onClose={() => setTerminalOpen(id, false)} />
               </Panel>
             </>
           )}

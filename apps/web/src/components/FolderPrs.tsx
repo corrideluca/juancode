@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
-import type { ProviderId, PrChecks, PullRequest } from "../protocol.ts";
+import type { ProviderId, PrChecks, PullRequest, TrackState } from "../protocol.ts";
+import { resolveTrackNotification, trackPr, untrackPr, useTrackedPr } from "../lib/trackedPrs.ts";
 
 /** Build the single-line seed prompt auto-submitted to a PR-context session. */
 function prPrompt(pr: PullRequest): string {
@@ -14,6 +15,12 @@ const CHECK_STYLE: Record<PrChecks, { dot: string; text: string; label: string }
   failing: { dot: "bg-red-500", text: "text-red-400", label: "Checks failing" },
   pending: { dot: "bg-amber-500", text: "text-amber-400", label: "Checks running" },
   none: { dot: "bg-neutral-600", text: "text-neutral-500", label: "No checks" },
+};
+
+const TRACK_STYLE: Record<TrackState, { text: string; label: string }> = {
+  watching: { text: "text-sky-400", label: "Watching" },
+  fixing: { text: "text-amber-400", label: "Fixing" },
+  needs_decision: { text: "text-red-400", label: "Needs decision" },
 };
 
 const POPOVER_WIDTH = 288; // w-72
@@ -153,63 +160,118 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
               {q || mineOnly ? "No matching PRs" : "No open PRs"}
             </div>
           )}
-          {list.map((pr) => {
-            const check = CHECK_STYLE[pr.checks];
-            return (
-              <div key={pr.number} className="px-2 py-1.5 hover:bg-neutral-800/60">
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${check.dot}`}
-                    title={check.label}
-                  />
-                  <a
-                    href={pr.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                    className="truncate text-xs text-neutral-200 hover:underline"
-                    title={pr.title}
-                  >
-                    <span className="text-neutral-500">#{pr.number}</span> {pr.title}
-                  </a>
-                  {pr.draft && (
-                    <span className="shrink-0 rounded bg-neutral-700 px-1 text-[9px] text-neutral-300">
-                      draft
-                    </span>
-                  )}
-                </div>
-                <div className="mt-1 flex items-center gap-2 pl-3 text-[11px]">
-                  <a
-                    href={pr.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                    className="text-sky-400 hover:underline"
-                  >
-                    Open ↗
-                  </a>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setOpen(false);
-                      onNewSession("claude", cwd, prPrompt(pr));
-                    }}
-                    className="rounded px-1 text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
-                  >
-                    ＋ session
-                  </button>
-                  <span className={`ml-auto shrink-0 ${check.text}`} title={check.label}>
-                    {check.label}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
+          {list.map((pr) => (
+            <PrRow
+              key={pr.number}
+              pr={pr}
+              cwd={cwd}
+              onSpawn={() => {
+                setOpen(false);
+                onNewSession("claude", cwd, prPrompt(pr));
+              }}
+            />
+          ))}
           </div>,
           document.body,
         )}
     </span>
+  );
+}
+
+/**
+ * One PR in the popover, with its CI badge, "+ session" / "Open" actions, and the
+ * Track toggle (juancode-bt2). When tracked, shows the live tracking state and any
+ * outstanding needs-decision notifications (dismissable). Tracking is driven over
+ * the wire — `trackPr` spawns the agent session server-side.
+ */
+function PrRow({ pr, cwd, onSpawn }: { pr: PullRequest; cwd: string; onSpawn: () => void }) {
+  const check = CHECK_STYLE[pr.checks];
+  const tracked = useTrackedPr(cwd, pr.number);
+  const track = tracked ? TRACK_STYLE[tracked.state] : null;
+  return (
+    <div className="px-2 py-1.5 hover:bg-neutral-800/60">
+      <div className="flex items-center gap-1.5">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${check.dot}`} title={check.label} />
+        <a
+          href={pr.url}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="truncate text-xs text-neutral-200 hover:underline"
+          title={pr.title}
+        >
+          <span className="text-neutral-500">#{pr.number}</span> {pr.title}
+        </a>
+        {pr.draft && (
+          <span className="shrink-0 rounded bg-neutral-700 px-1 text-[9px] text-neutral-300">draft</span>
+        )}
+      </div>
+      <div className="mt-1 flex items-center gap-2 pl-3 text-[11px]">
+        <a
+          href={pr.url}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="text-sky-400 hover:underline"
+        >
+          Open ↗
+        </a>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onSpawn();
+          }}
+          className="rounded px-1 text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+        >
+          ＋ session
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (tracked) untrackPr(tracked.id);
+            else trackPr(cwd, pr);
+          }}
+          className={`rounded px-1 transition-colors ${
+            tracked
+              ? "bg-sky-600/30 text-sky-300 hover:bg-sky-600/40"
+              : "text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
+          }`}
+          title={tracked ? "Stop tracking this PR" : "Track this PR (auto-fix + escalate)"}
+        >
+          {tracked ? "Tracking" : "Track"}
+        </button>
+        <span className={`ml-auto shrink-0 ${track ? track.text : check.text}`} title={track ? track.label : check.label}>
+          {track ? track.label : check.label}
+        </span>
+      </div>
+      {tracked && tracked.notifications.length > 0 && (
+        <div className="mt-1 ml-3 space-y-1">
+          {tracked.notifications.map((n) => (
+            <div
+              key={n.id}
+              className="flex items-start gap-1.5 rounded border border-red-500/30 bg-red-500/10 px-1.5 py-1 text-[10px] text-red-200"
+            >
+              <span className="min-w-0 flex-1">{n.message}</span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  resolveTrackNotification(tracked.id, n.id);
+                }}
+                className="shrink-0 rounded px-1 text-red-300 hover:bg-red-500/20"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

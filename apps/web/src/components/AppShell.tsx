@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { Sidebar } from "./Sidebar.tsx";
+import { onTrackNotification } from "../lib/trackedPrs.ts";
+import { notifications } from "../lib/notifications.ts";
 
 /**
  * Responsive app shell. On desktop the sidebar is a static column (unchanged
@@ -15,6 +17,15 @@ export function AppShell() {
   useEffect(() => {
     setDrawerOpen(false);
   }, [pathname]);
+
+  // Alert on tracked-PR needs-decision escalations (juancode-bt2): the same
+  // urgent ding + (backgrounded-tab) OS notification used for "session needs
+  // input", since a tracked PR raising a decision likewise wants the user.
+  useEffect(() => {
+    return onTrackNotification(({ prNumber, message }) =>
+      notifications.fire("waiting_input", `PR #${prNumber}: ${message}`, `track-${prNumber}`),
+    );
+  }, []);
 
   // Close on Escape for keyboard users.
   useEffect(() => {

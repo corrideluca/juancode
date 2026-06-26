@@ -375,6 +375,16 @@ public final class Session: @unchecked Sendable {
         pasteAndSubmit(trimmed)
     }
 
+    /// Insert `text` into an already-live session's prompt **without** submitting
+    /// — a bracketed paste with no trailing Enter, so the user can review/edit it
+    /// before sending. Used by the ⌘K prompt-template palette's "insert" action
+    /// (juancode-2vd). `submit` is the same delivery plus the separate Enter.
+    public func insert(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        paste(trimmed)
+    }
+
     /// Deliver `trimmed` as a bracketed paste, then send the submitting Enter as
     /// a separate keystroke a beat later so the CR registers as submit.
     private func pasteAndSubmit(_ trimmed: String) {

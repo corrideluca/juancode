@@ -41,6 +41,9 @@ final class WebSocketConnection: @unchecked Sendable {
     private var activityWatchers: [() -> Void] = []
     private var openedEditors: Set<String> = []
     private var openedTerminals: Set<String> = []
+    /// Cancel handle for this tab's tracked-PR subscription (juancode-bt2), set when
+    /// the client sends `subscribeTrackedPrs`.
+    private var trackedPrsUnsub: (@Sendable () -> Void)?
 
     init(state: AppState, send: @escaping @Sendable (ServerMessage) -> Void) {
         self.state = state
@@ -58,15 +61,18 @@ final class WebSocketConnection: @unchecked Sendable {
     }
 
     func close() {
-        let (subs, watchers, eds, terms): ([() -> Void], [() -> Void], Set<String>, Set<String>) =
+        let (subs, watchers, eds, terms, prsUnsub):
+            ([() -> Void], [() -> Void], Set<String>, Set<String>, (@Sendable () -> Void)?) =
             lock.withLock {
-                let r = (Array(subscriptions.values), activityWatchers, openedEditors, openedTerminals)
+                let r = (Array(subscriptions.values), activityWatchers, openedEditors, openedTerminals, trackedPrsUnsub)
                 subscriptions.removeAll(); activityWatchers.removeAll()
                 openedEditors.removeAll(); openedTerminals.removeAll()
+                trackedPrsUnsub = nil
                 return r
             }
         for c in subs { c() }
         for w in watchers { w() }
+        prsUnsub?()
         // Editor + shell ptys are tab-scoped — tear them down with the connection.
         for id in eds { state.ephemeral.get(id)?.kill() }
         for id in terms { state.ephemeral.get(id)?.kill() }
@@ -255,6 +261,32 @@ final class WebSocketConnection: @unchecked Sendable {
 
         case let .kill(sessionId):
             resolvePty(sessionId)?.kill()
+
+        // ── Tracked-PR registry (juancode-bt2) ───────────────────────────────────
+        case .subscribeTrackedPrs:
+            // Idempotent: a tab subscribes once. Fan the engine's changes through
+            // `send`, mapped to the wire ServerMessages. The engine hands us the
+            // current snapshot synchronously on subscribe.
+            if lock.withLock({ trackedPrsUnsub != nil }) { return }
+            let off = await state.prTracking.subscribe { [weak self] change in
+                switch change {
+                case let .tracked(list):
+                    self?.send(.trackedPrs(tracked: list))
+                case let .notification(trackedId, prNumber, notification):
+                    self?.send(.trackNotification(trackedId: trackedId, prNumber: prNumber,
+                                                  notification: notification))
+                }
+            }
+            lock.withLock { trackedPrsUnsub = off }
+
+        case let .trackPr(cwd, pr):
+            await state.prTracking.track(pr, cwd: cwd)
+
+        case let .untrackPr(trackedId):
+            await state.prTracking.untrack(trackedId)
+
+        case let .resolveTrackNotification(trackedId, notificationId):
+            await state.prTracking.resolveNotification(trackedId: trackedId, notificationId: notificationId)
         }
     }
 }

@@ -145,6 +145,10 @@ struct JuancodeApp: App {
                     .keyboardShortcut("n", modifiers: [.command])
                 Button("New Session…") { model.showingNewSession = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                // ⌘K opens the prompt-template palette: pick a saved prompt and
+                // insert (or insert+send) it into the active session (juancode-2vd).
+                Button("Prompt Templates…") { model.showingPromptPalette = true }
+                    .keyboardShortcut("k", modifiers: [.command])
             }
             CommandGroup(after: .toolbar) {
                 Button("Toggle Performance HUD") { PerfMonitor.shared.visible.toggle() }
