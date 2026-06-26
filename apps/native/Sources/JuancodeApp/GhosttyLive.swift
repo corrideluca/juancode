@@ -7,7 +7,8 @@ import JuancodeServices
 /// SPIKE (juancode bd: replace SwiftTerm with GhosttyKit): a drop-in alternative
 /// to `SwiftTermLive`, rendering the live pty with libghostty's GPU surface instead
 /// of SwiftTerm's CoreGraphics one. Same public `View` interface so the call site
-/// can A/B between them behind `JUANCODE_GHOSTTY=1`.
+/// can A/B between them: Ghostty is the default, `JUANCODE_SWIFTTERM=1` opts back
+/// to SwiftTerm for comparison (see `TerminalBackendChoice`).
 ///
 /// The architecture is preserved: *we* own the pty (local `forkpty` / remote
 /// `node-pty`); libghostty's `InMemoryTerminalSession` is a host-driven backend —
