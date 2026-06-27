@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { Sidebar } from "./Sidebar.tsx";
+import { ConnectionBanner } from "./ConnectionBanner.tsx";
 import { onTrackNotification } from "../lib/trackedPrs.ts";
 import { notifications } from "../lib/notifications.ts";
 
@@ -39,6 +40,7 @@ export function AppShell() {
 
   return (
     <div className="flex h-full w-full overflow-hidden">
+      <ConnectionBanner />
       {/* Desktop sidebar: static column. Hidden on small screens. */}
       <div className="hidden md:flex">
         <Sidebar />

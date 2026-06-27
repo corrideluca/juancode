@@ -80,8 +80,29 @@ function check401(res: Response): void {
   if (res.status === 401) promptForToken();
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * GET with a small backoff retry for *network* failures only — a dropped/locked
+ * connection rejects `fetch` with a TypeError ("Failed to fetch") that resolves
+ * itself once the link is back. HTTP error responses (4xx/5xx) are returned as
+ * usual for the caller to handle; we never retry a non-idempotent request here.
+ */
+async function fetchGetWithRetry(url: string, attempts = 3): Promise<Response> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fetch(url, { headers: authHeaders() });
+    } catch (err) {
+      lastErr = err; // network error — fetch only rejects for these, not for 4xx/5xx
+      if (i < attempts - 1) await sleep(Math.min(300 * 2 ** i, 2000));
+    }
+  }
+  throw lastErr;
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: authHeaders() });
+  const res = await fetchGetWithRetry(url);
   if (!res.ok) {
     check401(res);
     throw new Error(`${res.status} ${res.statusText}`);

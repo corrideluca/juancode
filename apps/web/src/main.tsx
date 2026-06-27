@@ -12,7 +12,26 @@ import { NewSession } from "./components/NewSession.tsx";
 import { SessionView } from "./components/SessionView.tsx";
 import "./styles.css";
 
-const queryClient = new QueryClient();
+// A 4xx (bad request, missing, 401 → handled by promptForToken) won't fix
+// itself by retrying; anything else (network "Failed to fetch", 5xx, timeouts)
+// is treated as transient so a backgrounded/locked phone resuming mid-request
+// recovers silently instead of surfacing a hard error.
+function isRetriableError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return !/^4\d\d\b/.test(msg);
+}
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // Refetch the moment the network/tab is back — this is what clears any
+      // error state captured while the phone was locked or backgrounded.
+      refetchOnReconnect: "always",
+      retry: (failureCount, error) => isRetriableError(error) && failureCount < 5,
+      retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 10_000),
+    },
+  },
+});
 
 const rootRoute = createRootRoute({
   component: AppShell,
