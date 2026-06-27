@@ -10,6 +10,7 @@ import type { SpawnOptions } from "./providers.ts";
 import { deriveSessionTitle } from "./sessionTitle.ts";
 import { deriveSessionUsage } from "./sessionUsage.ts";
 import { ActivityDetector } from "./activityDetector.ts";
+import { notificationGate } from "./notificationGate.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
 import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
 import type { ProviderId, SessionActivity, SessionMeta } from "./protocol.ts";
@@ -73,7 +74,11 @@ export class Session {
   ) {
     this.meta = meta;
     this.detector = new ActivityDetector(cols, rows, (state, notify) => {
-      for (const l of this.activityListeners) l(state, notify);
+      // De-spam the alert flag: a live agent oscillates waiting_input↔busy and
+      // ends many short turns, each a genuine transition. The gate collapses
+      // those bursts so clients ding / OS-notify once, not once per repaint.
+      const alert = notify && notificationGate.shouldNotify(this.meta.id, state);
+      for (const l of this.activityListeners) l(state, alert);
     });
     // Preferred activity signal: pulse the detector busy on each batch of agent
     // records the CLI appends to its transcript. The id is read via a getter so
@@ -123,6 +128,7 @@ export class Session {
       this.meta.exitCode = exitCode;
       this.meta.updatedAt = Date.now();
       this.detector.reset();
+      notificationGate.forget(this.meta.id);
       this.activityTail.stop();
       this.stopTitleWatch();
       void this.refreshTitle(); // one last read to catch a late-generated title

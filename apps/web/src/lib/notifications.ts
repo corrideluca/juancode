@@ -79,9 +79,18 @@ function osNotify(body: string, tag: string): void {
   // to an OS notification when the user has tabbed away.
   if (!document.hidden) return;
   try {
-    const n = new Notification("juancode", { body, tag });
+    // Stable per-session `tag` + `renotify:false`: Chrome/Android replace an
+    // existing notification for the same session in place (no stacking, no
+    // re-buzz) instead of piling a fresh one on for every turn boundary.
+    // `renotify` isn't in this TS lib's NotificationOptions yet, but Chrome/Android
+    // honour it — cast so the silent in-place replace still ships.
+    const n = new Notification("juancode", { body, tag, renotify: false } as NotificationOptions & {
+      renotify: boolean;
+    });
     n.onclick = () => {
       window.focus();
+      // Deep-link: surface the session that needs attention (handled by AppShell).
+      window.dispatchEvent(new CustomEvent("juancode:notification-click", { detail: { sessionId: tag } }));
       n.close();
     };
   } catch {
