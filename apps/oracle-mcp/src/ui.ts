@@ -701,12 +701,86 @@ async function send(){
   $("#log").appendChild(typing); $("#log").scrollTop = $("#log").scrollHeight;
   $("#c-send").disabled = true;
   try {
-    const r = await api("/api/chat", { method:"POST", body: JSON.stringify({ text, sessionId: currentSessionId }) }); setConn(true);
-    typing.remove();
-    if (r.sessionId) currentSessionId = r.sessionId; // adopt the live thread id
-    addMsg(r.isError ? "or err" : "or", r.reply || "(no reply)");
-  } catch(e){ setConn(false); typing.remove(); addMsg("or err", e.message); }
+    await streamTurn(text, typing);          // live SSE — reply renders as it arrives
+  } catch(_e){
+    setConn(false);
+    // Streaming was unusable before any reply text showed (old browser, or a proxy
+    // that buffers SSE) — fall back to the one-shot blocking turn, reusing the bubble.
+    try { await blockingTurn(text, typing); }
+    catch(e2){ setConn(false); typing.remove(); addMsg("or err", e2.message); }
+  }
   $("#c-send").disabled = false;
+}
+// One blocking turn against /api/chat — the fallback when SSE can't be used.
+async function blockingTurn(text, typing){
+  const r = await api("/api/chat", { method:"POST", body: JSON.stringify({ text, sessionId: currentSessionId }) });
+  setConn(true); typing.remove();
+  if (r.sessionId) currentSessionId = r.sessionId; // adopt the live thread id
+  addMsg(r.isError ? "or err" : "or", r.reply || "(no reply)");
+}
+// Parse one SSE frame ("event: <x>" + "data: <json>") and dispatch to handle(event, data).
+function parseSseFrame(frame, handle){
+  let event = "message", data = "";
+  const lines = frame.split("\\n");
+  for (let i = 0; i < lines.length; i++){
+    const line = lines[i];
+    if (line.indexOf("event:") === 0) event = line.slice(6).trim();
+    else if (line.indexOf("data:") === 0) data += line.slice(5).trim();
+  }
+  if (!data) return;
+  let parsed; try { parsed = JSON.parse(data); } catch(_){ return; }
+  handle(event, parsed);
+}
+// Stream one turn over SSE (POST /api/chat/stream). Throws — so send() can fall back —
+// ONLY when nothing was rendered yet; once any delta shows, later errors are annotated
+// in place instead (re-running the turn would duplicate the visible reply).
+async function streamTurn(text, typing){
+  const res = await fetch("/api/chat/stream", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text, sessionId: currentSessionId }),
+  });
+  if (!res.ok || !res.body || typeof res.body.getReader !== "function") throw new Error("stream unavailable");
+  setConn(true);
+
+  let bubble = null, raw = "", gotDelta = false, sawError = false;
+  const appendDelta = (t) => {
+    if (!bubble) { typing.remove(); bubble = addMsg("or", ""); }
+    raw += t; bubble.innerHTML = mdLite(raw);
+    $("#log").scrollTop = $("#log").scrollHeight;
+  };
+  const handle = (event, data) => {
+    if (event === "delta" && data && typeof data.text === "string") { gotDelta = true; appendDelta(data.text); }
+    else if (event === "done") {
+      if (data && data.sessionId) currentSessionId = data.sessionId; // adopt the live thread id
+      if (!bubble) { typing.remove(); bubble = addMsg(data && data.isError ? "or err" : "or", "(no reply)"); }
+      else if (data && data.isError) bubble.classList.add("err");
+    } else if (event === "error") {
+      sawError = true;
+      if (gotDelta) addMsg("or err", (data && data.message) || "stream interrupted");
+    }
+  };
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const r = await reader.read();
+      if (r.done) break;
+      buf += dec.decode(r.value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\\n\\n")) >= 0) {
+        const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        parseSseFrame(frame, handle);
+      }
+    }
+  } catch(e){
+    if (!gotDelta) throw e;                 // nothing shown yet → safe to fall back
+    addMsg("or err", "stream interrupted"); return;
+  }
+  if (buf.trim()) parseSseFrame(buf, handle); // flush any trailing frame
+  // Stream closed having shown nothing usable → let send() fall back to /api/chat.
+  if (!gotDelta && (sawError || !bubble)) { typing.remove(); throw new Error("empty stream"); }
 }
 $("#c-send").onclick = send;
 $("#c-input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });

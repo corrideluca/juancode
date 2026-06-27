@@ -25,6 +25,7 @@ import {
   listIssues,
   listSessions,
   oracleChat,
+  oracleChatStream,
   resetChat,
 } from "./oracle.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
@@ -271,6 +272,47 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     res.json(await oracleChat(text, typeof sessionId === "string" ? sessionId : null));
   } catch (e) {
     sendErr(res, e);
+  }
+});
+
+// Live chat over Server-Sent Events: the console POSTs here and reads the Oracle's
+// reply as it streams (`event: delta`), then a terminal `event: done` carrying the
+// (possibly new) session id. The console falls back to the blocking /api/chat above
+// when SSE is unavailable (old browser, or a proxy that buffers the stream). Auth is
+// the same Cloudflare Access cookie as every other route.
+app.post("/api/chat/stream", async (req: Request, res: Response) => {
+  const { text, sessionId } = req.body ?? {};
+  if (typeof text !== "string" || !text.trim()) {
+    res.status(400).send("text is required");
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // Disable proxy buffering (nginx/cloudflared) so deltas reach the phone live.
+    "X-Accel-Buffering": "no",
+  });
+  // An initial comment opens the stream promptly through intermediaries.
+  res.write(": open\n\n");
+  const sse = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  // Abort the underlying `claude` child if the phone navigates away mid-turn.
+  const ac = new AbortController();
+  res.on("close", () => ac.abort());
+  try {
+    const done = await oracleChatStream(
+      text,
+      typeof sessionId === "string" ? sessionId : null,
+      (chunk) => sse("delta", { text: chunk }),
+      ac.signal,
+    );
+    sse("done", { sessionId: done.sessionId, isError: done.isError });
+  } catch (e) {
+    sse("error", { message: e instanceof Error ? e.message : String(e) });
+  } finally {
+    res.end();
   }
 });
 

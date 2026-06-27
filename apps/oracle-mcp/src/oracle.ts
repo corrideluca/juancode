@@ -276,13 +276,22 @@ export async function oracleChat(text: string, sessionId?: string | null): Promi
   // a fresh conversation rather than surfacing that as the Oracle's answer.
   if (result.processError && resume) result = await runClaude(text, null);
   const reply = result.reply;
-  // Persist the session: continuing the same id just bumps it; anything else (a new
-  // chat, or a fresh id after a stale resume) is recorded with a title from the prompt.
-  if (reply.sessionId) {
-    if (resume && reply.sessionId === resume) await touchChatSession(reply.sessionId);
-    else await upsertChatSession(reply.sessionId, deriveTitle(text));
-  }
+  await persistChatSession(resume, text, reply.sessionId);
   return reply;
+}
+
+/** Record a finished turn's session so the console can list + continue it. Continuing
+ *  the same id just bumps its timestamp; anything else (a new chat, or a fresh id after
+ *  a stale resume) is recorded with a title derived from the prompt. Shared by the
+ *  blocking (`oracleChat`) and streaming (`oracleChatStream`) paths. */
+async function persistChatSession(
+  resume: string | null,
+  text: string,
+  sessionId: string | null,
+): Promise<void> {
+  if (!sessionId) return;
+  if (resume && sessionId === resume) await touchChatSession(sessionId);
+  else await upsertChatSession(sessionId, deriveTitle(text));
 }
 
 /** A short, single-line label for a chat session, from its opening prompt. */
@@ -367,6 +376,219 @@ async function runClaude(
     reply: { reply: result, isError: parsed.is_error === true, sessionId },
     processError: false,
   };
+}
+
+// ── Streaming chat (live SSE) ────────────────────────────────────────────────
+// The phone console upgrades the chat into a live stream: instead of blocking on a
+// single `claude -p --output-format json` call (up to 180s with only a typing dot),
+// it consumes `--output-format stream-json` and renders the Oracle's reply as it is
+// produced. `oracleChatStream` runs the turn and invokes `onDelta` for each chunk of
+// assistant text; the HTTP layer (index.ts) relays those over Server-Sent Events.
+
+/** Pull the text out of a `content_block_delta` partial event (token-level streaming
+ *  from `--include-partial-messages`); "" for any other event. */
+function partialDeltaText(event: unknown): string {
+  const e = asRecord(event);
+  if (e.type !== "content_block_delta") return "";
+  const delta = asRecord(e.delta);
+  return delta.type === "text_delta" && typeof delta.text === "string" ? delta.text : "";
+}
+
+/** Concatenate the text blocks of a whole `assistant` message (used when a run emits
+ *  no token-level partials), ignoring tool-use / thinking blocks. */
+function assistantMessageText(message: unknown): string {
+  const content = asRecord(message).content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map(asRecord)
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text as string)
+    .join("");
+}
+
+/**
+ * Stateful reducer over claude's `--output-format stream-json` NDJSON. Each line is
+ * one of:
+ *   - {type:"system",subtype:"init",session_id}                     → carries the id
+ *   - {type:"stream_event",event:{type:"content_block_delta",delta:{type:"text_delta",text}}}
+ *                                                                    → token partials
+ *   - {type:"assistant",message:{content:[{type:"text",text}]},session_id}
+ *                                                                    → a whole message
+ *   - {type:"result",subtype,result,is_error,session_id}            → final summary
+ * We prefer token partials; if a run produces none we fall back to whole assistant
+ * messages; if neither yields text the final `result` is surfaced via `fallbackText`.
+ * Exported for unit testing — the parsing contract is the fragile part.
+ */
+export class ChatStreamReducer {
+  sessionId: string | null = null;
+  isError = false;
+  done = false;
+  /** The final `result` text — only emitted when nothing streamed (see fallbackText). */
+  private finalText = "";
+  private sawPartial = false;
+  private emittedText = false;
+
+  /** Feed one parsed NDJSON object; returns assistant text to append (already deduped). */
+  push(obj: Record<string, unknown>): string[] {
+    const sid = obj.session_id;
+    if (typeof sid === "string" && sid) this.sessionId = sid;
+
+    switch (obj.type) {
+      case "stream_event": {
+        const text = partialDeltaText(obj.event);
+        if (!text) return [];
+        this.sawPartial = true;
+        this.emittedText = true;
+        return [text];
+      }
+      case "assistant": {
+        if (this.sawPartial) return []; // already streamed this turn token-by-token
+        const text = assistantMessageText(obj.message);
+        if (!text) return [];
+        this.emittedText = true;
+        return [text];
+      }
+      case "result": {
+        this.done = true;
+        if (obj.is_error === true) this.isError = true;
+        if (typeof obj.result === "string") this.finalText = obj.result;
+        return [];
+      }
+      default:
+        return [];
+    }
+  }
+
+  /** Text to emit after the stream ends if nothing streamed live; "" otherwise. */
+  fallbackText(): string {
+    return this.emittedText ? "" : this.finalText;
+  }
+}
+
+interface StreamRunResult {
+  sessionId: string | null;
+  isError: boolean;
+  emittedAny: boolean;
+  /** The process failed to produce a usable turn (non-zero exit, nothing emitted). */
+  processError: boolean;
+  errorText: string;
+}
+
+/** Spawn one `claude -p --output-format stream-json` turn, invoking `onDelta` for each
+ *  chunk of assistant text as it arrives. Mirrors `runClaude`'s env handling (strips
+ *  ANTHROPIC_API_KEY so claude uses the claude.ai subscription). `signal` aborts the
+ *  child if the client disconnects. */
+async function runClaudeStream(
+  text: string,
+  resume: string | null,
+  onDelta: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<StreamRunResult> {
+  const claude = process.env.JUANCODE_CLAUDE_BIN || "claude";
+  const args = [
+    "-p",
+    text,
+    "--output-format",
+    "stream-json",
+    "--verbose", // required by claude for stream-json under -p
+    "--include-partial-messages", // token-level deltas, not just whole messages
+    "--dangerously-skip-permissions",
+    "--append-system-prompt",
+    ORACLE_SYSTEM,
+  ];
+  if (resume) args.push("--resume", resume);
+
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+
+  const reducer = new ChatStreamReducer();
+  let emittedAny = false;
+  let stderr = "";
+
+  const code = await new Promise<number>((resolve) => {
+    const child = spawn(claude, args, { cwd: oracleDir(), env, stdio: ["ignore", "pipe", "pipe"] });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
+    const onAbort = () => child.kill("SIGKILL");
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    let buf = "";
+    child.stdout.on("data", (d: Buffer) => {
+      buf += d.toString();
+      let nl: number;
+      // Line-buffer the NDJSON stream; a chunk can split mid-line.
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let obj: unknown;
+        try {
+          obj = JSON.parse(line);
+        } catch {
+          continue; // ignore any non-JSON noise on stdout
+        }
+        for (const piece of reducer.push(asRecord(obj))) {
+          emittedAny = true;
+          onDelta(piece);
+        }
+      }
+    });
+    child.stderr.on("data", (d) => (stderr += d));
+    const finish = (c: number) => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve(c);
+    };
+    child.on("error", () => finish(-1));
+    child.on("close", (c) => finish(c ?? -1));
+  });
+
+  // If the turn produced no streamed text, fall back to the final `result` body.
+  const fallback = reducer.fallbackText();
+  if (fallback) {
+    emittedAny = true;
+    onDelta(fallback);
+  }
+
+  return {
+    sessionId: reducer.sessionId,
+    isError: reducer.isError || code !== 0,
+    emittedAny,
+    processError: code !== 0 && !emittedAny,
+    errorText: stderr.trim() || `claude exited ${code}`,
+  };
+}
+
+export interface ChatStreamDone {
+  sessionId: string | null;
+  isError: boolean;
+}
+
+/** Run one streaming Oracle turn. Calls `onDelta` for each chunk of reply text, then
+ *  resolves once the turn is done. A stale `--resume` id (nothing streamed, non-zero
+ *  exit) is retried once as a fresh conversation, matching `oracleChat`. The finished
+ *  session is persisted so the console can list + continue it. */
+export async function oracleChatStream(
+  text: string,
+  sessionId: string | null | undefined,
+  onDelta: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<ChatStreamDone> {
+  const resume = sessionId && sessionId.length > 0 ? sessionId : null;
+  let res = await runClaudeStream(text, resume, onDelta, signal);
+  // Stale/unknown resume id → claude exits non-zero with nothing streamed; retry fresh
+  // (but only when nothing was shown, so we never double up a visible reply).
+  if (res.processError && resume && !res.emittedAny && !signal?.aborted) {
+    res = await runClaudeStream(text, null, onDelta, signal);
+  }
+  if (res.processError && !res.emittedAny) {
+    // Nothing usable came back — surface the failure as the reply body.
+    onDelta(res.errorText);
+    return { sessionId: res.sessionId, isError: true };
+  }
+  await persistChatSession(resume, text, res.sessionId);
+  return { sessionId: res.sessionId, isError: res.isError };
 }
 
 /** Reset the phone chat conversation (next `oracleChat` starts fresh). */
