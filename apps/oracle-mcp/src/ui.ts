@@ -339,7 +339,13 @@ export const consoleHtml = /* html */ `<!doctype html>
        event handler) up to max-height, then scrolls internally. min-width:0
        lets the flex item shrink so the caret/box never overflows the viewport. */
     resize: none; overflow-y: auto;
+    /* Hide the scrollbar: a single resting line (24px line-height + 24px
+       padding) is a hair taller than the 46px box, so the gutter would draw a
+       stray vertical line down the right edge by the send button. Content still
+       scrolls internally once it grows past max-height. */
+    scrollbar-width: none;
   }
+  .composer textarea::-webkit-scrollbar { width: 0; height: 0; display: none; }
   .composer .send {
     width: var(--tap); height: var(--tap); flex: none; border: 0; border-radius: 50%;
     background: linear-gradient(180deg, var(--tint), var(--tint-strong)); color: var(--tint-ink);
