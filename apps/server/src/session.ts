@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import * as pty from "node-pty";
 import { SCROLLBACK_LIMIT } from "./config.ts";
+import { getLoginEnv } from "./loginEnv.ts";
 import { Scrollback } from "./scrollback.ts";
 import { captureCodexSessionId } from "./codexSession.ts";
 import { sessionDb } from "./db.ts";
@@ -132,8 +133,13 @@ export class Session {
       cols,
       rows,
       cwd: meta.cwd,
-      // Inherit the real environment so the CLI loads the user's auth + MCPs.
-      env: process.env as Record<string, string>,
+      // Inherit the user's FULL login-shell environment (captured once at first
+      // spawn) so the CLI loads the same PATH, auth, and MCP-relevant vars it
+      // would in a terminal — even when juancode was launched from a GUI/launchd
+      // context with a stripped env. We spawn the CLI binary directly (no shell),
+      // so without this it would only get this process's env. This augments, never
+      // shadows: HOME/CODEX_HOME and the user's config are left untouched.
+      env: getLoginEnv(),
     });
 
     if (isNew) sessionDb.insert(this.meta);
