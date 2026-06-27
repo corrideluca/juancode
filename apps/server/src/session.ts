@@ -456,15 +456,42 @@ export class Session {
       // After picking a menu option that opens a text field ("tell Claude what to
       // do differently"), give the TUI a beat to show the input before pasting.
       if (option !== undefined) await sleep(150);
-      this.write(`\x1b[200~${note}\x1b[201~`);
-      await sleep(80);
-      this.write("\r");
+      await this.pasteAndSubmit(note);
     }
   }
 
   onActivity(listener: ActivityListener): () => void {
     this.activityListeners.add(listener);
     return () => this.activityListeners.delete(listener);
+  }
+
+  /**
+   * Inject `text` into a *running* session right now to redirect it mid-task —
+   * the interrupt-and-steer path, as opposed to {@link kickQueue}/{@link flushQueue}
+   * which line a message up for the next idle turn boundary. The CLIs accept input
+   * while the agent is working (Claude Code reads typed-and-submitted text as a
+   * steering instruction for the current turn), so we deliver it with the same
+   * bracketed-paste-then-Enter primitive the seed / queue / decision paths use.
+   * Throws if the session isn't live so the caller can surface it.
+   */
+  async steer(text: string): Promise<void> {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (!this.isRunning) throw new Error("session is not running");
+    await this.pasteAndSubmit(trimmed);
+  }
+
+  /**
+   * Bracketed-paste `text` into the pty and submit it with a lone Enter. The
+   * split — paste (`ESC[200~ … ESC[201~`) then a *separate* CR — is essential: a
+   * `${text}\r` burst is read as a paste with the CR kept literal, so the prompt
+   * never submits. Shared by the seed, queue, decision-reply, and steer paths.
+   */
+  private async pasteAndSubmit(text: string, pauseMs = QUEUE.pasteToEnterMs): Promise<void> {
+    this.write(`\x1b[200~${text}\x1b[201~`);
+    await sleep(pauseMs);
+    if (!this.isRunning) return;
+    this.write("\r");
   }
 
   /**
@@ -498,10 +525,8 @@ export class Session {
       while (this.isRunning && this.activity === "idle") {
         const item = messageQueue.peek(this.meta.id);
         if (!item) break;
-        this.write(`\x1b[200~${item.text}\x1b[201~`);
-        await sleep(QUEUE.pasteToEnterMs);
+        await this.pasteAndSubmit(item.text);
         if (!this.isRunning) break;
-        this.write("\r");
         const accepted = await this.waitUntil(
           QUEUE.acceptMs,
           QUEUE.pollMs,

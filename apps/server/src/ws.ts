@@ -456,6 +456,16 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        case "steerMessage": {
+          const text = msg.text.trim();
+          if (!text) return;
+          // Inject into the live session right now (interrupt-and-steer). No-op
+          // if it isn't live; swallow the not-running race so it can't reject.
+          const live = registry.get(msg.sessionId);
+          if (live) void live.steer(text).catch(() => {});
+          return;
+        }
+
         case "input": {
           resolvePty(msg.sessionId)?.write(msg.data);
           return;
