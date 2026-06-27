@@ -358,7 +358,16 @@ export const consoleHtml = /* html */ `<!doctype html>
   .chat-empty .emoji { font-size: 28px; display: block; margin-bottom: 10px; }
   .chat-empty .big { color: var(--txt); font-weight: 600; font-size: 16px; }
   .chat-empty .small { font-size: 13.5px; margin-top: 6px; line-height: 1.5; }
-  /* Chat session bar + past-chats list */
+  /* Chat session bar + past-chats list. The head is pinned to the top of the
+     scroll area (sticky relative to <main>) so the ☰ Chats / ＋ New switcher —
+     and the past-chats list it toggles — stay reachable while the log scrolls
+     under it. Negative side margins + matching padding let the solid backdrop
+     span main's full width so messages don't peek past its edges. The notch is
+     already handled by the sticky <header> above main. */
+  .chat-head {
+    position: sticky; top: 0; z-index: 5;
+    margin: 0 -12px; padding: 0 12px; background: var(--bg);
+  }
   #chat-bar { display: flex; align-items: center; gap: 8px; padding: 4px 0 6px; }
   #c-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--faint);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -470,12 +479,14 @@ export const consoleHtml = /* html */ `<!doctype html>
     <!-- ── Chat ───────────────────────────────────────── -->
     <section id="chat" class="tab">
       <div id="chat-wrap">
-        <div id="chat-bar">
-          <button id="c-history" class="chat-pill" aria-label="Past chats">☰ Chats</button>
-          <span id="c-title">New chat</span>
-          <button id="c-new" class="chat-pill">＋ New</button>
+        <div class="chat-head">
+          <div id="chat-bar">
+            <button id="c-history" class="chat-pill" aria-label="Past chats">☰ Chats</button>
+            <span id="c-title">New chat</span>
+            <button id="c-new" class="chat-pill">＋ New</button>
+          </div>
+          <div id="chat-sessions" hidden></div>
         </div>
-        <div id="chat-sessions" hidden></div>
         <div id="log"></div>
         <div class="dock">
           <div class="attach">
