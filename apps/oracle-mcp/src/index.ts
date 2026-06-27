@@ -11,8 +11,16 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { loadEnvFile } from "./load-env.ts";
+
+// Seed config (e.g. TELEGRAM_BOT_TOKEN / ALLOWED_USER_IDS) from apps/oracle-mcp/.env
+// when not already exported by the launching shell. Must run before anything reads
+// process.env below. A real shell export always wins; a missing file is a no-op.
+const loaded = loadEnvFile(join(dirname(fileURLToPath(import.meta.url)), "..", ".env"));
+if (loaded.length) console.log(`oracle-mcp: loaded ${loaded.length} var(s) from .env`);
 import express, { type Request, type Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -40,6 +48,7 @@ import {
   vapidPublicKey,
   webManifest,
 } from "./push.ts";
+import { startTelegramBridge } from "./telegram.ts";
 
 type ToolResult = {
   content: { type: "text"; text: string }[];
@@ -479,4 +488,7 @@ app.listen(port, host, () => {
   void initPush()
     .then(() => startActivityListener())
     .catch((e) => console.error("oracle-mcp push init failed:", e));
+  // Telegram bridge (juancode-c6y): if TELEGRAM_BOT_TOKEN is set, long-poll Telegram
+  // and route messages through the same Oracle backend as the browser chat.
+  startTelegramBridge();
 });
