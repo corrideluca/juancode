@@ -9,6 +9,10 @@
 // forwards already-authenticated requests, so the sidecar binds to localhost and
 // trusts its caller. Never expose this port directly to the internet.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import express, { type Request, type Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -17,6 +21,7 @@ import {
   appendAsk,
   appendDispatch,
   createIssue,
+  deliverReply,
   listIssues,
   listSessions,
   oracleChat,
@@ -39,6 +44,17 @@ type ToolResult = {
   content: { type: "text"; text: string }[];
   isError?: boolean;
 };
+
+/** Where phone-composer uploads land. The Oracle's `claude -p` runs on this same
+ *  machine, so a temp-dir path is directly readable once inlined into the message. */
+const UPLOAD_DIR = join(tmpdir(), "oracle-uploads");
+
+/** Strip a client-supplied filename down to a safe, space-free basename. */
+function safeUploadName(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() ?? "";
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
+  return cleaned.slice(-128) || "file";
+}
 
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const fail = (message: string): ToolResult => ({
@@ -253,6 +269,50 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       return;
     }
     res.json(await oracleChat(text, typeof sessionId === "string" ? sessionId : null));
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Accept an image/audio file's raw bytes from the phone composer, persist them, and
+// return the absolute path. The Oracle runs `claude -p` on this same Mac with
+// --dangerously-skip-permissions, so a saved path inlined into the chat message is
+// read by claude directly — mirrors apps/server's /api/uploads + the apps/web flow.
+// `express.raw` handles any content type for this route only; the global json parser
+// leaves non-json bodies untouched.
+app.post("/api/uploads", express.raw({ type: () => true, limit: "100mb" }), (req, res) => {
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) {
+    res.status(400).json({ error: "empty upload" });
+    return;
+  }
+  const name = safeUploadName(typeof req.query.name === "string" ? req.query.name : "");
+  try {
+    mkdirSync(UPLOAD_DIR, { recursive: true });
+    const path = join(UPLOAD_DIR, `${randomUUID().slice(0, 8)}-${name}`);
+    writeFileSync(path, body);
+    res.json({ path });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Deliver a typed reply from the phone into a live session's pty (answers the
+// agent's question / decision). Goes over the native server's WS `input`, so the
+// native app must be running. See oracle.ts deliverReply for the submit framing.
+app.post("/api/reply", async (req: Request, res: Response) => {
+  try {
+    const { sessionId, text } = req.body ?? {};
+    if (typeof sessionId !== "string" || !sessionId) {
+      res.status(400).send("sessionId is required");
+      return;
+    }
+    if (typeof text !== "string" || !text.trim()) {
+      res.status(400).send("text is required");
+      return;
+    }
+    await deliverReply(sessionId, text);
+    res.json({ ok: true });
   } catch (e) {
     sendErr(res, e);
   }

@@ -11,6 +11,7 @@ import { appendFile, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { WebSocket } from "ws";
 import { touchChatSession, upsertChatSession } from "./chat-store.ts";
 
 /** `~/.juancode/oracle` (the Oracle control dir), overridable to match the Swift
@@ -195,6 +196,64 @@ export async function listSessions(): Promise<unknown> {
   }
   if (!res.ok) throw new Error(`GET /api/sessions returned ${res.status}`);
   return res.json();
+}
+
+/** The native server's WebSocket URL, derived from the same base as the HTTP API. */
+function nativeWsUrl(): string {
+  return nativeApiBase().replace(/^http/, "ws") + "/ws";
+}
+
+/**
+ * Deliver a typed reply into a live session's pty from the phone. The native
+ * server's `input` message writes straight to the pty by sessionId (no attach
+ * needed), so we open a short-lived WS, bracketed-paste the text so the CLI's TUI
+ * treats it as one paste, pause, then send CR to submit — mirroring apps/server's
+ * `Session.respond`. Throws a clear error if the native app isn't reachable.
+ */
+export async function deliverReply(sessionId: string, text: string): Promise<void> {
+  const url = nativeWsUrl();
+  await new Promise<void>((resolve, reject) => {
+    const sock = new WebSocket(url);
+    const fail = (e: unknown) => {
+      try {
+        sock.close();
+      } catch {
+        /* already closing */
+      }
+      reject(
+        e instanceof Error
+          ? e
+          : new Error(`Couldn't reach the juancode app at ${nativeApiBase()} — is it running?`),
+      );
+    };
+    const timer = setTimeout(() => fail(new Error("timed out reaching the native app")), 5000);
+    sock.on("error", (e) => {
+      clearTimeout(timer);
+      fail(e);
+    });
+    sock.on("open", () => {
+      try {
+        sock.send(JSON.stringify({ type: "input", sessionId, data: `\x1b[200~${text}\x1b[201~` }));
+        // Give the TUI a beat to ingest the paste before the submitting CR, then a
+        // tick to flush before closing.
+        setTimeout(() => {
+          sock.send(JSON.stringify({ type: "input", sessionId, data: "\r" }));
+          setTimeout(() => {
+            clearTimeout(timer);
+            try {
+              sock.close();
+            } catch {
+              /* already closing */
+            }
+            resolve();
+          }, 80);
+        }, 80);
+      } catch (e) {
+        clearTimeout(timer);
+        fail(e);
+      }
+    });
+  });
 }
 
 export interface ChatReply {

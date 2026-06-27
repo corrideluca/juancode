@@ -307,11 +307,30 @@ export const consoleHtml = /* html */ `<!doctype html>
     animation: blink 1.2s infinite both; }
   .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
   @keyframes blink { 0%,80%,100% { opacity: .25; } 40% { opacity: 1; } }
-  .composer {
-    display: flex; gap: 9px; align-items: flex-end; padding: 10px 0 calc(var(--sab) + 6px);
+  .dock {
     position: sticky; bottom: 0;
-    background: linear-gradient(transparent, var(--bg) 28%);
+    background: linear-gradient(transparent, var(--bg) 24%);
+    padding-bottom: calc(var(--sab) + 6px);
   }
+  .composer {
+    display: flex; gap: 9px; align-items: flex-end; padding: 8px 0 0;
+  }
+  .attach { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0 0; }
+  .attach button {
+    display: inline-flex; align-items: center; gap: 5px; min-height: 34px;
+    padding: 0 12px; border: 0; border-radius: 999px; background: var(--panel);
+    color: var(--dim); box-shadow: inset 0 0 0 1px var(--line-soft);
+    font-size: 12.5px; font-weight: 600; transition: transform .08s;
+  }
+  .attach button:active { transform: scale(.96); }
+  .attach button:disabled { opacity: .5; }
+  .attach button.rec {
+    color: var(--bad); background: rgba(255,138,138,.12);
+    box-shadow: inset 0 0 0 1px rgba(255,138,138,.4);
+  }
+  .attach .a-status { flex: 1 1 100%; font-size: 12px; color: var(--faint); }
+  .attach .a-status.err { color: var(--bad); }
+  .attach .a-status:empty { display: none; }
   .composer textarea {
     flex: 1; min-height: var(--tap); max-height: 130px; height: var(--tap);
     border-radius: 22px; padding: 12px 16px; background: var(--panel);
@@ -351,6 +370,23 @@ export const consoleHtml = /* html */ `<!doctype html>
   .chat-srow .cx { flex: none; border: 0; background: transparent; color: var(--dim);
     font-size: 15px; padding: 4px 6px; border-radius: 8px; }
   .chat-srow .cx:active { background: var(--panel-2); }
+
+  /* ── Session inline reply ─────────────────────────────── */
+  .sess { cursor: pointer; }
+  .sess .reply-hint { margin-top: 9px; font-size: 12px; font-weight: 600; color: var(--tint); }
+  .sreply { display: flex; gap: 8px; align-items: flex-end; margin-top: 10px; cursor: auto; }
+  .sreply textarea {
+    flex: 1; min-height: 40px; max-height: 120px; height: 40px;
+    border-radius: 12px; padding: 9px 13px; background: var(--bg-2);
+  }
+  .sreply .sreply-send {
+    width: 40px; height: 40px; flex: none; border: 0; border-radius: 50%;
+    background: linear-gradient(180deg, var(--tint), var(--tint-strong)); color: var(--tint-ink);
+    font-size: 16px; font-weight: 800; display: grid; place-items: center;
+    box-shadow: 0 3px 12px rgba(60,110,230,.3); transition: transform .08s, opacity .15s;
+  }
+  .sreply .sreply-send:active { transform: scale(.94); }
+  .sreply .sreply-send:disabled { opacity: .45; }
 
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .001ms !important; transition: none !important; }
@@ -430,10 +466,20 @@ export const consoleHtml = /* html */ `<!doctype html>
         </div>
         <div id="chat-sessions" hidden></div>
         <div id="log"></div>
-        <div class="composer">
-          <textarea id="c-input" placeholder="Ask the Oracle…" rows="1"></textarea>
-          <button id="c-send" class="send" aria-label="Send">➤</button>
+        <div class="dock">
+          <div class="attach">
+            <button id="a-photo" type="button">📷 Photo</button>
+            <button id="a-rec" type="button" hidden>🎤 Record</button>
+            <button id="a-file" type="button">📎 Attach</button>
+            <span id="a-status" class="a-status"></span>
+          </div>
+          <div class="composer">
+            <textarea id="c-input" placeholder="Ask the Oracle…" rows="1"></textarea>
+            <button id="c-send" class="send" aria-label="Send">➤</button>
+          </div>
         </div>
+        <input id="a-photo-input" type="file" accept="image/*" capture="environment" hidden />
+        <input id="a-file-input" type="file" accept="image/*,audio/*" hidden />
       </div>
     </section>
   </main>
@@ -532,12 +578,20 @@ async function loadSessions(){
     el.innerHTML = list.map((s) => {
       const st = (s.status||"").toLowerCase();
       const live = st && st !== "exited" && st !== "closed" && st !== "done";
-      return '<div class="card item"><div class="row"><span class="title">'+esc(s.title||"untitled")+'</span>'
+      const id = esc(s.id || s.cliSessionId || "");
+      const head = '<div class="row"><span class="title">'+esc(s.title||"untitled")+'</span>'
       + '<span class="badge b-open spacer">'+esc(s.provider||"agent")+'</span></div>'
       + '<div class="meta"><span class="mono">'+esc(s.cwd||"")+'</span>'
-      + (s.status?'<span class="badge '+(live?"b-ready":"b-closed")+'">'+esc(s.status)+'</span>':'')
-      + '</div></div>';
+      + (s.status?'<span class="badge '+(live?"b-ready":"b-closed")+'">'+esc(s.status)+'</span>':'')+'</div>';
+      if (!live || !id) return '<div class="card item">'+head+'</div>';
+      return '<div class="card item sess" data-id="'+id+'">'+head
+      + '<div class="reply-hint">Tap to reply →</div>'
+      + '<div class="sreply" hidden>'
+      + '<textarea class="sreply-in" placeholder="Reply to this agent…" rows="1"></textarea>'
+      + '<button class="sreply-send" aria-label="Send reply">➤</button></div></div>';
     }).join("");
+    // A push notification may have asked us to open a specific session's reply box.
+    if (pendingReplyId) { openSessionReply(pendingReplyId); pendingReplyId = null; }
   } catch(e){ setConn(false); el.innerHTML = errState(e.message, "sessions"); }
 }
 $("#d-go").onclick = async () => {
@@ -553,6 +607,58 @@ $("#d-go").onclick = async () => {
     await loadSessions();
   } catch(e){ alert("Dispatch failed: "+e.message); btn.textContent = "Dispatch agent"; btn.disabled = false; }
 };
+
+// ── Reply into a live session ─────────────────────────────
+// Tap a running session card to reveal an inline reply box; the text is delivered
+// into that session's pty (POST /api/reply). A push notification deep-links here via
+// ?session=<id>, which opens the matching card's box once the list renders.
+let pendingReplyId = null;
+function openSessionReply(id){
+  const sel = (window.CSS && CSS.escape) ? CSS.escape(id) : id;
+  const card = document.querySelector('#sessions-list .sess[data-id="' + sel + '"]');
+  if (!card) return;
+  const box = card.querySelector(".sreply"), hint = card.querySelector(".reply-hint");
+  if (!box) return;
+  box.hidden = false; if (hint) hint.hidden = true;
+  const ta = box.querySelector("textarea"); if (ta) ta.focus();
+  card.scrollIntoView({ block: "center" });
+}
+async function sendReply(card){
+  if (!card) return;
+  const id = card.dataset.id, ta = card.querySelector(".sreply-in"), btn = card.querySelector(".sreply-send");
+  const text = ta ? ta.value.trim() : ""; if (!text) { if (ta) ta.focus(); return; }
+  if (btn) btn.disabled = true;
+  try {
+    await api("/api/reply", { method:"POST", body: JSON.stringify({ sessionId: id, text }) }); setConn(true);
+    if (ta) { ta.value = ""; ta.style.height = ""; }
+    card.querySelector(".sreply").hidden = true;
+    const hint = card.querySelector(".reply-hint"); if (hint) { hint.hidden = false; hint.textContent = "Sent ✓ — tap to reply again"; }
+  } catch(e){ setConn(false); alert("Couldn't send the reply: " + e.message); }
+  if (btn) btn.disabled = false;
+}
+$("#sessions-list").addEventListener("click", (e) => {
+  const sendBtn = e.target.closest && e.target.closest(".sreply-send");
+  if (sendBtn) { sendReply(sendBtn.closest(".sess")); return; }
+  if (e.target.closest && e.target.closest(".sreply")) return; // typing — don't toggle
+  const card = e.target.closest && e.target.closest(".sess[data-id]");
+  if (!card) return;
+  const box = card.querySelector(".sreply"), hint = card.querySelector(".reply-hint");
+  if (!box) return;
+  const show = box.hidden; box.hidden = !show; if (hint) hint.hidden = show;
+  if (show) { const ta = box.querySelector("textarea"); if (ta) ta.focus(); }
+});
+$("#sessions-list").addEventListener("input", (e) => {
+  const t = e.target;
+  if (t && t.classList && t.classList.contains("sreply-in")) {
+    t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 120) + "px";
+  }
+});
+$("#sessions-list").addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t && t.classList && t.classList.contains("sreply-in") && e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault(); sendReply(t.closest(".sess"));
+  }
+});
 
 // ── Chat ──────────────────────────────────────────────────
 // Minimal, XSS-safe markdown: escape first, then **bold**, \`code\`, bullets.
@@ -603,6 +709,65 @@ $("#c-input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.s
 $("#c-input").addEventListener("input", (e) => {
   const t = e.target; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 130) + "px";
 });
+
+// ── Attachments (image / voice → the Oracle) ──────────────
+// Phones have no drag-drop or paste, so offer explicit tap targets. Each file is
+// uploaded to the sidecar (POST /api/uploads) and its saved absolute path is inlined
+// into the composer; the headless \`claude -p\` Oracle reads that path like any other.
+// Mirrors the apps/web AttachBar flow (50 MB client ceiling; server caps at 100 MB).
+const MAX_UPLOAD = 50 * 1024 * 1024;
+function fmtSize(n){ return n < 1048576 ? Math.round(n/1024)+" KB" : (n/1048576).toFixed(1)+" MB"; }
+function setAStatus(msg, isErr){ const el = $("#a-status"); el.textContent = msg || ""; el.className = "a-status" + (isErr ? " err" : ""); }
+function inlineAttachment(path){
+  const inp = $("#c-input");
+  const sep = inp.value && !/\\s$/.test(inp.value) ? " " : "";
+  inp.value = inp.value + sep + path + " ";
+  inp.dispatchEvent(new Event("input")); // re-trigger auto-grow
+  inp.focus();
+}
+async function uploadAttachment(file){
+  if (file.size > MAX_UPLOAD){ setAStatus((file.name || "file") + " is too large (max " + fmtSize(MAX_UPLOAD) + ")", true); return; }
+  setAStatus("Uploading " + (file.name || "file") + "…", false);
+  try {
+    const r = await fetch("/api/uploads?name=" + encodeURIComponent(file.name || "upload"), {
+      method: "POST", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    const data = await r.json(); setConn(true);
+    inlineAttachment(data.path);
+    setAStatus("Attached ✓ — add a question, then send", false);
+  } catch(e){ setConn(false); setAStatus("Upload failed: " + e.message, true); }
+}
+function onPick(e){ const f = e.target.files && e.target.files[0]; if (f) uploadAttachment(f); e.target.value = ""; }
+$("#a-photo").onclick = () => $("#a-photo-input").click();
+$("#a-file").onclick = () => $("#a-file-input").click();
+$("#a-photo-input").addEventListener("change", onPick);
+$("#a-file-input").addEventListener("change", onPick);
+
+// Voice clip via MediaRecorder — hidden where unsupported (old iOS / insecure origin).
+const canRecord = typeof window.MediaRecorder !== "undefined" && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+if (canRecord) {
+  const recBtn = $("#a-rec"); recBtn.hidden = false;
+  let recorder = null, chunks = [], stream = null, recording = false;
+  recBtn.onclick = async () => {
+    if (recording) { if (recorder && recorder.state === "recording") recorder.stop(); return; }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recorder = new MediaRecorder(stream); chunks = [];
+      recorder.ondataavailable = (ev) => { if (ev.data.size > 0) chunks.push(ev.data); };
+      recorder.onstop = () => {
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+        stream = null; recording = false;
+        recBtn.classList.remove("rec"); recBtn.textContent = "🎤 Record";
+        const type = recorder.mimeType || "audio/webm";
+        const ext = (type.indexOf("mp4") >= 0 || type.indexOf("m4a") >= 0) ? "m4a" : type.indexOf("ogg") >= 0 ? "ogg" : "webm";
+        const blob = new Blob(chunks, { type });
+        if (blob.size > 0) uploadAttachment(new File([blob], "recording-" + Date.now() + "." + ext, { type }));
+      };
+      recorder.start(); recording = true;
+      recBtn.classList.add("rec"); recBtn.textContent = "⏹ Stop";
+    } catch(e){ setAStatus("Mic unavailable: " + e.message, true); }
+  };
+}
 
 // ── Past chats ─────────────────────────────────────────────
 function ago(ms){
@@ -766,7 +931,19 @@ async function disablePush(){
 refreshPushState();
 
 // ── Boot ──────────────────────────────────────────────────
-loadIssues();
+// Deep-link from a push notification: /?session=<id> jumps to the Sessions tab and
+// opens that session's reply box once the list renders (pendingReplyId is consumed
+// by loadSessions). Otherwise land on Issues as usual.
+(function () {
+  let sid = null;
+  try { sid = new URLSearchParams(location.search).get("session"); } catch (_) { sid = null; }
+  if (sid) {
+    pendingReplyId = sid;
+    const tabBtn = document.querySelector('nav button[data-tab="sessions"]');
+    if (tabBtn) { tabBtn.click(); return; } // click() loads the session list
+  }
+  loadIssues();
+})();
 </script>
 </body>
 </html>`;

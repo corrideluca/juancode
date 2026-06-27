@@ -28,11 +28,39 @@ const VAPID_SUBJECT = "mailto:juan@fanvue.com";
 
 /** Resolve the native backend's WS URL from the same base oracle.ts uses for its
  *  HTTP calls. Kept local (oracle.ts doesn't export nativeApiBase). */
-function nativeWsUrl(): string {
-  const base = process.env.JUANCODE_API
+function nativeHttpBase(): string {
+  return process.env.JUANCODE_API
     ? process.env.JUANCODE_API.replace(/\/$/, "")
     : `http://127.0.0.1:${process.env.JUANCODE_PORT || "4280"}`;
-  return base.replace(/^http/, "ws") + "/ws";
+}
+
+function nativeWsUrl(): string {
+  return nativeHttpBase().replace(/^http/, "ws") + "/ws";
+}
+
+/** Resolve a session's human title from the native REST list so notifications can
+ *  name it. The `activity` broadcast carries no title; the REST list does. Fetched
+ *  fresh each time (notifications are infrequent and titles change as work
+ *  progresses) with a short timeout; returns null on any miss/error so callers fall
+ *  back to the id. */
+async function resolveSessionTitle(sessionId: string): Promise<string | null> {
+  if (!sessionId) return null;
+  try {
+    const res = await fetch(`${nativeHttpBase()}/api/sessions`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as unknown;
+    const list = Array.isArray(data)
+      ? data
+      : ((data as { sessions?: unknown[] })?.sessions ?? []);
+    const match = (list as Array<Record<string, unknown>>).find(
+      (s) => s && typeof s.id === "string" && s.id === sessionId,
+    );
+    return match && typeof match.title === "string" && match.title.trim() ? match.title : null;
+  } catch {
+    return null;
+  }
 }
 
 let publicKey = "";
@@ -159,9 +187,9 @@ function scheduleReconnect(): void {
   setTimeout(connect, delay);
 }
 
-// Track session titles from activity so notification copy can name the session;
-// the native server doesn't include titles on activity, so this stays generic
-// until a richer source is wired (juancode-6f0).
+// Notification copy names the session: the `activity` broadcast carries no title,
+// so we resolve it from the native REST session list (resolveSessionTitle), falling
+// back to a short id slice when unavailable.
 async function handleMessage(raw: string): Promise<void> {
   let msg: Record<string, unknown>;
   try {
@@ -180,10 +208,14 @@ async function handleMessage(raw: string): Promise<void> {
         : state === "idle"
           ? "finished"
           : "updated";
+    const title =
+      (await resolveSessionTitle(sessionId)) ||
+      ("Session " + (sessionId ? sessionId.slice(0, 8) : ""));
     await sendPushToAll({
-      title: "Session " + (sessionId ? sessionId.slice(0, 8) : ""),
+      title,
+      // Deep-link the console straight to this session's reply box.
+      url: sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/",
       body,
-      url: "/",
       tag: sessionId ? `session-${sessionId}` : "session",
     });
     return;
@@ -229,7 +261,13 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
       for (const w of wins) {
-        if ("focus" in w) return w.focus();
+        if ("focus" in w) {
+          // Deep-link (?session=…): steer the open window to it, then focus.
+          if (url !== "/" && "navigate" in w) {
+            return w.navigate(url).then((c) => (c || w).focus()).catch(() => w.focus());
+          }
+          return w.focus();
+        }
       }
       if (clients.openWindow) return clients.openWindow(url);
     }),
