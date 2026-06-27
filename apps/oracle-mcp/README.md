@@ -86,6 +86,11 @@ Transport is long-poll `getUpdates` (no webhook), so it works behind the existin
 `/start`) resets it. Replies are chunked to Telegram's 4096-char limit. Only users in
 `ALLOWED_USER_IDS` are answered; everyone else is silently ignored.
 
+Config is read from the process env, with a fallback `apps/oracle-mcp/.env`
+(gitignored) loaded at startup — a real shell export always wins over the file. Copy
+`.env.example` to `.env` and fill in `TELEGRAM_BOT_TOKEN` + `ALLOWED_USER_IDS` (the bot
+is `@main_claw_mc_bot`, carried over from the deprecated juan-code Codex bot).
+
 Smoke-test locally with the MCP Inspector or curl:
 
 ```sh

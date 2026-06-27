@@ -11,6 +11,11 @@ data/
 *.db-journal
 *.db-wal
 
+# secrets / local env (never commit tokens) — keep the .example templates
+.env
+.env.*
+!.env.example
+
 # editor
 .vscode/*
 !.vscode/extensions.json
