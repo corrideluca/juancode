@@ -675,6 +675,25 @@ function mdLite(s){ return esc(s)
 // only the session record server-side — the transcript isn't kept — so switching to a
 // past chat starts with an empty log but continues its context on the next message.
 let currentSessionId = null;
+let currentChatTitle = "";
+// Persist the active chat across page reloads. The session list + transcript
+// continuity already live server-side (oracle-chat-sessions.json + claude --resume);
+// the browser only needs to remember WHICH session it was in, since currentSessionId
+// is in-memory and resets to null on reload — making the conversation look lost.
+const ACTIVE_CHAT_KEY = "oracle-active-chat";
+function saveActiveChat(){
+  try {
+    if (currentSessionId) localStorage.setItem(ACTIVE_CHAT_KEY, JSON.stringify({ id: currentSessionId, title: currentChatTitle }));
+    else localStorage.removeItem(ACTIVE_CHAT_KEY);
+  } catch (_) { /* private mode / quota — restore is best-effort */ }
+}
+function readActiveChat(){
+  try {
+    const raw = localStorage.getItem(ACTIVE_CHAT_KEY); if (!raw) return null;
+    const o = JSON.parse(raw);
+    return o && typeof o.id === "string" && o.id ? o : null;
+  } catch (_) { return null; }
+}
 const emptyConsult =
   '<div class="chat-empty"><span class="emoji">✦</span>'
   + '<div class="big">Consult the Oracle</div>'
@@ -690,7 +709,7 @@ function addMsg(cls, text){
   if (cls.indexOf("me") >= 0) d.textContent = text; else d.innerHTML = mdLite(text);
   $("#log").appendChild(d); $("#log").scrollTop = $("#log").scrollHeight; return d;
 }
-function setChatTitle(t){ $("#c-title").textContent = t || (currentSessionId ? "Chat" : "New chat"); }
+function setChatTitle(t){ currentChatTitle = (t || "").trim(); $("#c-title").textContent = t || (currentSessionId ? "Chat" : "New chat"); }
 async function send(){
   const inp = $("#c-input"); const text = inp.value.trim(); if (!text) return;
   const wasNew = !currentSessionId;
@@ -703,7 +722,7 @@ async function send(){
   try {
     const r = await api("/api/chat", { method:"POST", body: JSON.stringify({ text, sessionId: currentSessionId }) }); setConn(true);
     typing.remove();
-    if (r.sessionId) currentSessionId = r.sessionId; // adopt the live thread id
+    if (r.sessionId) { currentSessionId = r.sessionId; saveActiveChat(); } // adopt the live thread id + remember it across reloads
     addMsg(r.isError ? "or err" : "or", r.reply || "(no reply)");
   } catch(e){ setConn(false); typing.remove(); addMsg("or err", e.message); }
   $("#c-send").disabled = false;
@@ -783,12 +802,25 @@ function ago(ms){
   return Math.floor(s/86400)+"d ago";
 }
 function startNewChat(){
-  currentSessionId = null; setChatTitle("New chat");
+  currentSessionId = null; setChatTitle("New chat"); saveActiveChat();
   $("#chat-sessions").hidden = true; showChatEmpty(); $("#c-input").focus();
 }
 async function selectChat(id, title){
-  currentSessionId = id; setChatTitle(title);
+  currentSessionId = id; setChatTitle(title); saveActiveChat();
   $("#chat-sessions").hidden = true; showChatEmpty(); $("#c-input").focus();
+}
+// Restore the chat you were in across a page reload. Validate the stored id against
+// the live list so a deleted session falls back to a fresh chat; keep it on a network
+// error so a transient outage doesn't wipe the active conversation.
+async function restoreActiveChat(){
+  const saved = readActiveChat();
+  if (!saved) return;
+  try {
+    const list = await api("/api/chat/sessions"); setConn(true);
+    const match = Array.isArray(list) ? list.find((s) => s.id === saved.id) : null;
+    if (!match) { saveActiveChat(); return; } // currentSessionId still null → clears the stale entry
+    currentSessionId = match.id; setChatTitle(match.title || saved.title || "Chat"); showChatEmpty();
+  } catch (_) { setConn(false); /* offline — retry on next reload, keep stored id */ }
 }
 async function loadChatSessions(){
   const el = $("#chat-sessions");
@@ -942,6 +974,7 @@ refreshPushState();
 (function () {
   let sid = null;
   try { sid = new URLSearchParams(location.search).get("session"); } catch (_) { sid = null; }
+  restoreActiveChat(); // re-open the chat you were in (no-op if none); independent of the landing tab
   if (sid) {
     pendingReplyId = sid;
     const tabBtn = document.querySelector('nav button[data-tab="sessions"]');
