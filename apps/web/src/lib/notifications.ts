@@ -1,5 +1,8 @@
 import type { SessionActivity } from "../protocol.ts";
 
+/** Alertable transitions, plus a synthetic "failed" for a session that exited nonzero. */
+type NotifyState = SessionActivity | "failed";
+
 /**
  * Alerts for session activity: a sound (distinct ding for "needs input" vs a
  * soft chime for "done") plus an OS notification when the tab is backgrounded.
@@ -73,7 +76,7 @@ function requestOsPermission(): void {
   if (Notification.permission === "default") void Notification.requestPermission();
 }
 
-function osNotify(body: string, tag: string): void {
+function osNotify(headline: string, body: string, tag: string): void {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   // The in-app sound + sidebar icon already cover a focused tab; only escalate
   // to an OS notification when the user has tabbed away.
@@ -84,7 +87,7 @@ function osNotify(body: string, tag: string): void {
     // re-buzz) instead of piling a fresh one on for every turn boundary.
     // `renotify` isn't in this TS lib's NotificationOptions yet, but Chrome/Android
     // honour it — cast so the silent in-place replace still ships.
-    const n = new Notification("juancode", { body, tag, renotify: false } as NotificationOptions & {
+    const n = new Notification(headline, { body, tag, renotify: false } as NotificationOptions & {
       renotify: boolean;
     });
     n.onclick = () => {
@@ -108,6 +111,24 @@ if (typeof window !== "undefined") {
   };
   window.addEventListener("pointerdown", unlock);
   window.addEventListener("keydown", unlock);
+}
+
+/** Per-session project name (cwd basename) used to prefix the alert body. */
+const projects = new Map<string, string>();
+
+function basename(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? "";
+}
+
+/** OS-notification title: what just happened. */
+function headlineFor(state: NotifyState): string {
+  return state === "waiting_input" ? "Needs your input" : state === "failed" ? "Failed" : "Finished";
+}
+
+/** Body label: "project · title" when the project is known and not already named, else the title. */
+function describe(title: string, sessionId: string): string {
+  const project = projects.get(sessionId);
+  return project && !title.includes(project) ? `${project} · ${title}` : title;
 }
 
 export const notifications = {
@@ -135,15 +156,26 @@ export const notifications = {
     return () => stateListeners.delete(listener);
   },
 
-  /** Fire the alert for a notable activity transition on a session. */
-  fire(state: SessionActivity, title: string, sessionId: string): void {
+  /**
+   * Fire the alert for a notable transition on a session. The OS notification's
+   * title says what happened ("Needs your input" / "Finished" / "Failed") and
+   * the body names the session as "project · title" — so a backgrounded phone
+   * shows something readable, never the raw session id (which stays only the
+   * in-place-replace tag and deep-link target).
+   */
+  fire(state: NotifyState, title: string, sessionId: string): void {
     if (!enabled) return;
-    if (state === "waiting_input") {
-      playDingDong();
-      osNotify(`${title} needs your input`, sessionId);
-    } else if (state === "idle") {
-      playChime();
-      osNotify(`${title} finished`, sessionId);
+    if (state !== "waiting_input" && state !== "idle" && state !== "failed") return;
+    if (state === "idle") playChime();
+    else playDingDong();
+    osNotify(headlineFor(state), describe(title, sessionId), sessionId);
+  },
+
+  /** Record per-session project names (cwd basename) so {@link fire} can name them. */
+  registerProjects(metas: Array<{ id: string; cwd: string }>): void {
+    for (const m of metas) {
+      const project = basename(m.cwd);
+      if (project) projects.set(m.id, project);
     }
   },
 };

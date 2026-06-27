@@ -24,6 +24,14 @@ function start(): void {
   if (started) return;
   started = true;
   socket.subscribe((msg: ServerMessage) => {
+    if (msg.type === "exit") {
+      // A session that exited nonzero while you were away is worth a ping; the
+      // osNotify focus guard keeps quiet when the tab is actually in front.
+      if (msg.exitCode != null && msg.exitCode !== 0) {
+        notifications.fire("failed", titles.get(msg.sessionId) ?? "Session", msg.sessionId);
+      }
+      return;
+    }
     if (msg.type !== "activity") return;
     let changed = false;
     if (map[msg.sessionId] !== msg.state) {
@@ -52,6 +60,7 @@ function start(): void {
 /** Keep titles fresh so notifications can name the session (called from the sidebar). */
 export function registerSessionTitles(metas: SessionMeta[]): void {
   for (const m of metas) titles.set(m.id, m.title);
+  notifications.registerProjects(metas);
 }
 
 function subscribe(cb: () => void): () => void {
