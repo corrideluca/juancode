@@ -1,4 +1,5 @@
 import type { SessionActivity } from "../protocol.ts";
+import { NotifyGate } from "./notifyGate.ts";
 
 /** Alertable transitions, plus a synthetic "failed" for a session that exited nonzero. */
 type NotifyState = SessionActivity | "failed";
@@ -19,6 +20,10 @@ const STORAGE_KEY = "juancode-notify";
 let enabled = readEnabled();
 let audio: AudioContext | null = null;
 const stateListeners = new Set<() => void>();
+const gate = new NotifyGate();
+
+/** Stable tag for the coalesced "several sessions" summary notification. */
+const SUMMARY_TAG = "juancode-activity";
 
 function readEnabled(): boolean {
   try {
@@ -76,7 +81,7 @@ function requestOsPermission(): void {
   if (Notification.permission === "default") void Notification.requestPermission();
 }
 
-function osNotify(headline: string, body: string, tag: string): void {
+function osNotify(headline: string, body: string, tag: string, onAck?: () => void): void {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   // The in-app sound + sidebar icon already cover a focused tab; only escalate
   // to an OS notification when the user has tabbed away.
@@ -95,6 +100,7 @@ function osNotify(headline: string, body: string, tag: string): void {
       // Deep-link: surface the session that needs attention (handled by AppShell).
       window.dispatchEvent(new CustomEvent("juancode:notification-click", { detail: { sessionId: tag } }));
       n.close();
+      onAck?.();
     };
   } catch {
     /* notification construction can throw on some platforms — ignore */
@@ -157,18 +163,33 @@ export const notifications = {
   },
 
   /**
-   * Fire the alert for a notable transition on a session. The OS notification's
-   * title says what happened ("Needs your input" / "Finished" / "Failed") and
-   * the body names the session as "project · title" — so a backgrounded phone
-   * shows something readable, never the raw session id (which stays only the
-   * in-place-replace tag and deep-link target).
+   * Fire the alert for a notable transition on a session. Gated by
+   * {@link NotifyGate} so detector flapping / simultaneous turn-ends can't turn
+   * into a notification flood. The OS notification's title says what happened
+   * ("Needs your input" / "Finished" / "Failed") and the body names the session
+   * as "project · title" — so a backgrounded phone shows something readable,
+   * never the raw session id (which stays only the in-place-replace tag and
+   * deep-link target).
    */
   fire(state: NotifyState, title: string, sessionId: string): void {
     if (!enabled) return;
     if (state !== "waiting_input" && state !== "idle" && state !== "failed") return;
+
+    const action = gate.decide(sessionId, state, Date.now());
+    if (action === "drop") return;
+
+    if (action === "coalesce") {
+      // A burst across many sessions collapses into one replace-in-place summary
+      // (single soft chime) instead of one banner + ding per session.
+      playChime();
+      osNotify("juancode", "Multiple sessions need your attention", SUMMARY_TAG);
+      return;
+    }
+
+    // action === "fire": a single per-session alert, acknowledged on click.
     if (state === "idle") playChime();
     else playDingDong();
-    osNotify(headlineFor(state), describe(title, sessionId), sessionId);
+    osNotify(headlineFor(state), describe(title, sessionId), sessionId, () => gate.clear(sessionId));
   },
 
   /** Record per-session project names (cwd basename) so {@link fire} can name them. */
@@ -177,5 +198,10 @@ export const notifications = {
       const project = basename(m.cwd);
       if (project) projects.set(m.id, project);
     }
+  },
+
+  /** Forget a session's notification dedup state (e.g. it was closed). */
+  clear(sessionId: string): void {
+    gate.clear(sessionId);
   },
 };
