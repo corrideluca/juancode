@@ -72,6 +72,19 @@ Environment variables (all optional):
 | `JUANCODE_ORACLE_DIR` | `~/.juancode/oracle` | Oracle control dir (mailboxes + `bd` tracker) |
 | `JUANCODE_API` | `http://127.0.0.1:4280` | Native app's embedded server base URL |
 | `JUANCODE_BD_BIN` | `bd` | Path to the `bd` binary |
+| `TELEGRAM_BOT_TOKEN` | _(unset)_ | BotFather token. When set, the sidecar long-polls Telegram and routes messages through the same Oracle chat backend as the browser console. Unset ⇒ bridge disabled. |
+| `ALLOWED_USER_IDS` | _(empty)_ | Comma/space-separated numeric Telegram user ids allowed to use the bridge. Empty ⇒ every message is ignored. |
+
+### Telegram bridge (juancode-c6y)
+
+With `TELEGRAM_BOT_TOKEN` set, you can chat with Oracle from Telegram using the
+**same brain and session model** as the browser console — each message is routed
+through `oracleChat` (headless `claude -p` with `--resume`), identical to `/api/chat`.
+Transport is long-poll `getUpdates` (no webhook), so it works behind the existing
+`oracle` Cloudflare Tunnel with no inbound port. Each Telegram chat keeps its **own**
+`claude` session id (separate from the browser thread, no cross-talk); `/new` (or
+`/start`) resets it. Replies are chunked to Telegram's 4096-char limit. Only users in
+`ALLOWED_USER_IDS` are answered; everyone else is silently ignored.
 
 Smoke-test locally with the MCP Inspector or curl:
 

@@ -39,6 +39,7 @@ import {
   vapidPublicKey,
   webManifest,
 } from "./push.ts";
+import { startTelegramBridge } from "./telegram.ts";
 
 type ToolResult = {
   content: { type: "text"; text: string }[];
@@ -437,4 +438,7 @@ app.listen(port, host, () => {
   void initPush()
     .then(() => startActivityListener())
     .catch((e) => console.error("oracle-mcp push init failed:", e));
+  // Telegram bridge (juancode-c6y): if TELEGRAM_BOT_TOKEN is set, long-poll Telegram
+  // and route messages through the same Oracle backend as the browser chat.
+  startTelegramBridge();
 });
