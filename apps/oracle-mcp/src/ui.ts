@@ -331,6 +331,30 @@ export const consoleHtml = /* html */ `<!doctype html>
   .attach .a-status { flex: 1 1 100%; font-size: 12px; color: var(--faint); }
   .attach .a-status.err { color: var(--bad); }
   .attach .a-status:empty { display: none; }
+  /* Preview tray — a chip per picked/recorded file, shown above the composer.
+     Each chip previews the media and carries a ✕ to drop it before sending; the
+     saved path is appended to the message on send (the Oracle's claude -p reads
+     it), so a raw path never clutters the input box. */
+  .a-tray { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 0 0; }
+  .a-tray[hidden] { display: none; }
+  .a-chip {
+    display: flex; align-items: center; gap: 8px; max-width: 100%;
+    padding: 5px 8px 5px 5px; border-radius: 12px; background: var(--panel);
+    box-shadow: inset 0 0 0 1px var(--line-soft);
+  }
+  .a-chip.err { box-shadow: inset 0 0 0 1px rgba(255,138,138,.4); }
+  .a-chip .thumb {
+    width: 36px; height: 36px; flex: none; border-radius: 8px; object-fit: cover;
+    background: var(--panel-2); display: grid; place-items: center; font-size: 17px; color: var(--dim);
+  }
+  .a-chip .info { min-width: 0; display: flex; flex-direction: column; }
+  .a-chip .nm { font-size: 12.5px; color: var(--txt); max-width: 150px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .a-chip .stt { font-size: 11px; color: var(--faint); margin-top: 1px; }
+  .a-chip.err .stt { color: var(--bad); }
+  .a-chip .rm { flex: none; border: 0; background: transparent; color: var(--dim);
+    font-size: 15px; padding: 2px 5px; border-radius: 8px; }
+  .a-chip .rm:active { background: var(--panel-2); }
   .composer textarea {
     flex: 1; min-width: 0; min-height: var(--tap); max-height: 130px; height: var(--tap);
     border-radius: 22px; padding: 12px 16px; background: var(--panel);
@@ -339,7 +363,13 @@ export const consoleHtml = /* html */ `<!doctype html>
        event handler) up to max-height, then scrolls internally. min-width:0
        lets the flex item shrink so the caret/box never overflows the viewport. */
     resize: none; overflow-y: auto;
+    /* Hide the scrollbar: a single resting line (24px line-height + 24px
+       padding) is a hair taller than the 46px box, so the gutter would draw a
+       stray vertical line down the right edge by the send button. Content still
+       scrolls internally once it grows past max-height. */
+    scrollbar-width: none;
   }
+  .composer textarea::-webkit-scrollbar { width: 0; height: 0; display: none; }
   .composer .send {
     width: var(--tap); height: var(--tap); flex: none; border: 0; border-radius: 50%;
     background: linear-gradient(180deg, var(--tint), var(--tint-strong)); color: var(--tint-ink);
@@ -352,14 +382,24 @@ export const consoleHtml = /* html */ `<!doctype html>
   .chat-empty .emoji { font-size: 28px; display: block; margin-bottom: 10px; }
   .chat-empty .big { color: var(--txt); font-weight: 600; font-size: 16px; }
   .chat-empty .small { font-size: 13.5px; margin-top: 6px; line-height: 1.5; }
-  /* Chat session bar + past-chats list */
+  /* Chat session bar + past-chats list. The head is pinned to the top of the
+     scroll area (sticky relative to <main>) so the ☰ Chats / ＋ New switcher —
+     and the past-chats list it toggles — stay reachable while the log scrolls
+     under it. Negative side margins + matching padding let the solid backdrop
+     span main's full width so messages don't peek past its edges. The notch is
+     already handled by the sticky <header> above main. */
+  .chat-head {
+    position: sticky; top: 0; z-index: 5;
+    margin: 0 -12px; padding: 0 12px; background: var(--bg);
+  }
   #chat-bar { display: flex; align-items: center; gap: 8px; padding: 4px 0 6px; }
   #c-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--faint);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-pill {
-    flex: none; padding: 5px 11px; min-height: 32px;
-    border: 0; border-radius: 999px; background: var(--panel); color: var(--faint);
-    box-shadow: inset 0 0 0 1px var(--line-soft); font-size: 12px; font-weight: 600;
+    flex: none; display: inline-flex; align-items: center; gap: 5px;
+    padding: 0 15px; min-height: 40px;
+    border: 0; border-radius: 999px; background: var(--panel); color: var(--dim);
+    box-shadow: inset 0 0 0 1px var(--line-soft); font-size: 13.5px; font-weight: 640;
   }
   .chat-pill:active { transform: scale(.96); }
   #chat-sessions { display: flex; flex-direction: column; gap: 6px; padding: 2px 0 8px;
@@ -464,12 +504,14 @@ export const consoleHtml = /* html */ `<!doctype html>
     <!-- ── Chat ───────────────────────────────────────── -->
     <section id="chat" class="tab">
       <div id="chat-wrap">
-        <div id="chat-bar">
-          <button id="c-history" class="chat-pill" aria-label="Past chats">☰ Chats</button>
-          <span id="c-title">New chat</span>
-          <button id="c-new" class="chat-pill">＋ New</button>
+        <div class="chat-head">
+          <div id="chat-bar">
+            <button id="c-history" class="chat-pill" aria-label="Past chats">☰ Chats</button>
+            <span id="c-title">New chat</span>
+            <button id="c-new" class="chat-pill">＋ New</button>
+          </div>
+          <div id="chat-sessions" hidden></div>
         </div>
-        <div id="chat-sessions" hidden></div>
         <div id="log"></div>
         <div class="dock">
           <div class="attach">
@@ -478,6 +520,7 @@ export const consoleHtml = /* html */ `<!doctype html>
             <button id="a-file" type="button">📎 Attach</button>
             <span id="a-status" class="a-status"></span>
           </div>
+          <div id="a-tray" class="a-tray" hidden></div>
           <div class="composer">
             <textarea id="c-input" placeholder="Ask the Oracle…" rows="1"></textarea>
             <button id="c-send" class="send" aria-label="Send">➤</button>
@@ -730,21 +773,30 @@ function addMsg(cls, text){
 }
 function setChatTitle(t){ currentChatTitle = (t || "").trim(); $("#c-title").textContent = t || (currentSessionId ? "Chat" : "New chat"); }
 async function send(){
-  const inp = $("#c-input"); const text = inp.value.trim(); if (!text) return;
+  const inp = $("#c-input"); const text = inp.value.trim();
+  if (pendingAtts.some((a) => a.status === "uploading")) { setAStatus("Hang on — still uploading…", false); return; }
+  const ready = pendingAtts.filter((a) => a.status === "done" && a.path);
+  if (!text && !ready.length) return;
   const wasNew = !currentSessionId;
-  addMsg("me", text); inp.value = ""; inp.style.height = "";
-  if (wasNew) setChatTitle(text.length > 40 ? text.slice(0,39)+"…" : text);
+  // Sent to the Oracle: the question plus each saved path so \`claude -p\` can read
+  // the files. Shown in the bubble: the question + file names (not long paths).
+  const sendText = [text].concat(ready.map((a) => a.path)).filter(Boolean).join(" ");
+  const names = ready.map((a) => a.name).join(", ");
+  const shown = ready.length ? (text ? text + "\\n📎 " + names : "📎 " + names) : text;
+  addMsg("me", shown); inp.value = ""; inp.style.height = ""; setAStatus(""); clearAtts();
+  const titleSrc = text || names;
+  if (wasNew) setChatTitle(titleSrc.length > 40 ? titleSrc.slice(0,39)+"…" : titleSrc);
   const typing = document.createElement("div"); typing.className = "typing";
   typing.innerHTML = "<i></i><i></i><i></i>";
   $("#log").appendChild(typing); $("#log").scrollTop = $("#log").scrollHeight;
   $("#c-send").disabled = true;
   try {
-    await streamTurn(text, typing);          // live SSE — reply renders as it arrives
+    await streamTurn(sendText, typing);      // live SSE — reply (incl. attachment paths) renders as it arrives
   } catch(_e){
     setConn(false);
     // Streaming was unusable before any reply text showed (old browser, or a proxy
     // that buffers SSE) — fall back to the one-shot blocking turn, reusing the bubble.
-    try { await blockingTurn(text, typing); }
+    try { await blockingTurn(sendText, typing); }
     catch(e2){ setConn(false); typing.remove(); addMsg("or err", e2.message); }
   }
   $("#c-send").disabled = false;
@@ -835,26 +887,58 @@ $("#c-input").addEventListener("input", (e) => {
 const MAX_UPLOAD = 50 * 1024 * 1024;
 function fmtSize(n){ return n < 1048576 ? Math.round(n/1024)+" KB" : (n/1048576).toFixed(1)+" MB"; }
 function setAStatus(msg, isErr){ const el = $("#a-status"); el.textContent = msg || ""; el.className = "a-status" + (isErr ? " err" : ""); }
-function inlineAttachment(path){
-  const inp = $("#c-input");
-  const sep = inp.value && !/\\s$/.test(inp.value) ? " " : "";
-  inp.value = inp.value + sep + path + " ";
-  inp.dispatchEvent(new Event("input")); // re-trigger auto-grow
-  inp.focus();
+
+// Media picked/recorded for the next message. Each file uploads to the sidecar
+// right away; on send its saved path is appended to the message text so the
+// headless \`claude -p\` Oracle can read the file. A preview chip per file lets
+// you drop it before sending — the raw path never lands in the input box.
+let pendingAtts = [];
+function newAttId(){ return crypto.randomUUID ? crypto.randomUUID() : "a" + Date.now() + "-" + pendingAtts.length; }
+function renderTray(){
+  const tray = $("#a-tray"); tray.hidden = pendingAtts.length === 0;
+  tray.innerHTML = pendingAtts.map((a) => {
+    const thumb = a.isImage && a.previewUrl
+      ? '<img class="thumb" src="' + a.previewUrl + '" alt="">'
+      : '<span class="thumb">' + (a.isAudio ? "🎵" : "📄") + '</span>';
+    const st = a.status === "uploading" ? "uploading…" : a.status === "error" ? (a.error || "failed") : fmtSize(a.size);
+    return '<div class="a-chip' + (a.status === "error" ? " err" : "") + '">' + thumb
+      + '<div class="info"><span class="nm">' + esc(a.name) + '</span><span class="stt">' + esc(st) + '</span></div>'
+      + '<button class="rm" data-rm="' + a.id + '" aria-label="Remove">✕</button></div>';
+  }).join("");
+}
+function removeAtt(id){
+  const a = pendingAtts.find((x) => x.id === id);
+  if (a && a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+  pendingAtts = pendingAtts.filter((x) => x.id !== id); renderTray();
+}
+function clearAtts(){
+  for (const a of pendingAtts) if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+  pendingAtts = []; renderTray();
 }
 async function uploadAttachment(file){
-  if (file.size > MAX_UPLOAD){ setAStatus((file.name || "file") + " is too large (max " + fmtSize(MAX_UPLOAD) + ")", true); return; }
-  setAStatus("Uploading " + (file.name || "file") + "…", false);
+  const isImage = (file.type || "").startsWith("image/");
+  const isAudio = (file.type || "").startsWith("audio/");
+  const att = {
+    id: newAttId(), name: file.name || "upload", size: file.size, isImage, isAudio,
+    previewUrl: isImage ? URL.createObjectURL(file) : null, status: "uploading", path: null,
+  };
+  pendingAtts.push(att);
+  if (file.size > MAX_UPLOAD){ att.status = "error"; att.error = "too large (max " + fmtSize(MAX_UPLOAD) + ")"; renderTray(); return; }
+  renderTray();
   try {
-    const r = await fetch("/api/uploads?name=" + encodeURIComponent(file.name || "upload"), {
+    const r = await fetch("/api/uploads?name=" + encodeURIComponent(att.name), {
       method: "POST", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
     if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
     const data = await r.json(); setConn(true);
-    inlineAttachment(data.path);
-    setAStatus("Attached ✓ — add a question, then send", false);
-  } catch(e){ setConn(false); setAStatus("Upload failed: " + e.message, true); }
+    att.path = data.path; att.status = "done";
+  } catch(e){ setConn(false); att.status = "error"; att.error = "upload failed"; setAStatus("Upload failed: " + e.message, true); }
+  renderTray();
 }
 function onPick(e){ const f = e.target.files && e.target.files[0]; if (f) uploadAttachment(f); e.target.value = ""; }
+$("#a-tray").addEventListener("click", (e) => {
+  const rm = e.target.closest && e.target.closest("[data-rm]");
+  if (rm) removeAtt(rm.dataset.rm);
+});
 $("#a-photo").onclick = () => $("#a-photo-input").click();
 $("#a-file").onclick = () => $("#a-file-input").click();
 $("#a-photo-input").addEventListener("change", onPick);
@@ -896,11 +980,11 @@ function ago(ms){
 }
 function startNewChat(){
   currentSessionId = null; setChatTitle("New chat"); saveActiveChat();
-  $("#chat-sessions").hidden = true; showChatEmpty(); $("#c-input").focus();
+  $("#chat-sessions").hidden = true; clearAtts(); setAStatus(""); showChatEmpty(); $("#c-input").focus();
 }
 async function selectChat(id, title){
   currentSessionId = id; setChatTitle(title); saveActiveChat();
-  $("#chat-sessions").hidden = true; showChatEmpty(); $("#c-input").focus();
+  $("#chat-sessions").hidden = true; clearAtts(); setAStatus(""); showChatEmpty(); $("#c-input").focus();
 }
 // Restore the chat you were in across a page reload. Validate the stored id against
 // the live list so a deleted session falls back to a fresh chat; keep it on a network
