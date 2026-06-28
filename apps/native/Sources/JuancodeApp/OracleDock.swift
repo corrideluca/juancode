@@ -45,6 +45,19 @@ struct OracleDock: View {
         // `.trailing` keeps the panel flush against the real right edge in both
         // states, so the slide-off-screen geometry is correct.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        // When collapsed, the whole dock overlay must be transparent to clicks so the
+        // sidebar session list + terminal underneath stay interactive. The scrim is
+        // only present `if expanded`, but it fades out via a `.transition(.opacity)`
+        // nested inside this geometry-animating ZStack — and a transition there can
+        // leave the faded scrim mounted for a beat (or, in practice, stuck) after
+        // `expanded` flips false. A lingering scrim still carries `.contentShape` +
+        // `.onTapGesture`, so it silently swallows every click over the window while
+        // `collapse()` just no-ops on its `guard expanded`, making it impossible to
+        // click a project session after dismissing the dock by clicking outside it.
+        // Gating hit-testing on `expanded` at the overlay root guarantees that the
+        // instant the dock is collapsed, nothing it owns can intercept a click —
+        // regardless of what SwiftUI does with the in-flight scrim transition.
+        .allowsHitTesting(oracle.expanded)
         .animation(.easeOut(duration: 0.16), value: oracle.expanded)
         // Open the app into the Oracle chat (juancode-8n0): chat is the main surface,
         // so the dock auto-presents on the chat tab at first launch. A one-shot inside
