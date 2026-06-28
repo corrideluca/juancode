@@ -45,6 +45,15 @@ struct OracleDock: View {
         // `.trailing` keeps the panel flush against the real right edge in both
         // states, so the slide-off-screen geometry is correct.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        // Gate the WHOLE overlay's hit testing on `expanded`. This overlay covers the
+        // entire window (RootView), so any hittable shape inside it (the scrim, or a
+        // scrim still fading out under the removal transition) would swallow every
+        // click meant for the app behind it. The scrim's `.transition(.opacity)` keeps
+        // it briefly mounted after collapse, and SwiftUI can leave that fading view
+        // intercepting hits until the next render — which is why clicks only came back
+        // after reopening the dock. Flipping the entire overlay click-through the
+        // instant it collapses makes the underlying app immediately clickable again.
+        .allowsHitTesting(oracle.expanded)
         .animation(.easeOut(duration: 0.16), value: oracle.expanded)
         // Open the app into the Oracle chat (juancode-8n0): chat is the main surface,
         // so the dock auto-presents on the chat tab at first launch. A one-shot inside

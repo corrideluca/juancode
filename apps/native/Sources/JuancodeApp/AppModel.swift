@@ -1031,10 +1031,17 @@ final class AppModel {
         persistTrackedIssues()
     }
 
-    /// Revive an exited session (mirrors the WS `reactivate` path).
-    func reactivate(_ id: String) async {
-        if isLive(id) { return }
-        guard var meta = appState.store.get(id) else { return }
+    /// Revive an exited session (mirrors the WS `reactivate` path). Returns whether
+    /// the prior CLI conversation actually resumed; `false` means it couldn't (no
+    /// id, spawn failed, or the resume died fast — see `confirmResumeSucceeded`), so
+    /// callers like the Oracle dock can fall back to a fresh spawn. `grid` overrides
+    /// the spawn size — the Oracle dock passes its own narrow grid so the resumed CLI
+    /// boots at the dock's width instead of the wide main-window `TerminalGrid.spawn`,
+    /// which otherwise wraps the TUI into garbage inside the drawer.
+    @discardableResult
+    func reactivate(_ id: String, grid: (cols: Int, rows: Int)? = nil) async -> Bool {
+        if isLive(id) { return true }
+        guard var meta = appState.store.get(id) else { return false }
         if meta.cliSessionId == nil {
             if let recovered = await recoverCliSessionId(
                 meta.provider, cwd: meta.cwd, createdAtMs: meta.createdAt,
@@ -1045,18 +1052,55 @@ final class AppModel {
         }
         guard meta.cliSessionId != nil else {
             errorMessage = "No prior CLI conversation could be found to resume this session."
-            return
+            return false
         }
         do {
             let prior = appState.store.getScrollback(id) ?? []
             let seed: [UInt8] = prior.isEmpty
                 ? [] : prior + Array("\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n".utf8)
-            let grid = TerminalGrid.spawn
-            _ = try appState.registry.resume(meta, cols: grid.cols, rows: grid.rows, priorScrollback: seed)
+            let g = grid ?? TerminalGrid.spawn
+            let session = try appState.registry.resume(meta, cols: g.cols, rows: g.rows, priorScrollback: seed)
             refresh()
+            return await confirmResumeSucceeded(session, sessionId: id, priorScrollback: prior)
         } catch {
             errorMessage = "Failed to resume: \(error)"
+            return false
         }
+    }
+
+    /// Verify a just-resumed pty actually attached to its prior conversation. A
+    /// `<cli> --resume <staleId>` against a transcript the CLI no longer has exits
+    /// almost immediately (`claude` prints "No conversation found with session ID:
+    /// …" and quits); a genuine resume keeps the pty alive with its TUI up. So treat
+    /// a fast exit as a failed resume and `invalidateFailedResume` — otherwise the
+    /// banner + the CLI's "No conversation found" error get persisted into scrollback
+    /// and re-seeded on every load, stacking "── session resumed ──" copies forever.
+    private func confirmResumeSucceeded(_ session: Session, sessionId: String,
+                                        priorScrollback: [UInt8]) async -> Bool {
+        let graceMs = 5000, pollMs = 150
+        var elapsed = 0
+        while elapsed < graceMs {
+            if !session.isRunning {
+                invalidateFailedResume(sessionId, priorScrollback: priorScrollback)
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(pollMs))
+            elapsed += pollMs
+        }
+        return session.isRunning
+    }
+
+    /// Mark a session whose resume died fast as unresumable: drop the stale
+    /// `cliSessionId` (so the next load spawns fresh instead of re-running the doomed
+    /// `--resume`) and roll the persisted scrollback back to its pre-resume state
+    /// (dropping the `── session resumed ──` banner + the CLI's failure output, so
+    /// nothing stacks across reloads).
+    private func invalidateFailedResume(_ sessionId: String, priorScrollback: [UInt8]) {
+        guard var meta = appState.store.get(sessionId) else { return }
+        meta.cliSessionId = nil
+        meta.status = .exited
+        appState.store.update(meta, scrollback: priorScrollback)
+        refresh()
     }
 
     /// Rename a session. Trims the input; an empty name is ignored. Updates the

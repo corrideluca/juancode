@@ -237,7 +237,9 @@ final class OracleModel {
         tab = .chat
         chatFocusToken += 1
         if app.liveSession(id) == nil {
-            Task { await app.reactivate(id) }
+            // Resume into the dock's grid, not the wide main-window one, so the CLI
+            // boots at the drawer width instead of wrapping into garbage.
+            Task { await app.reactivate(id, grid: dockGrid) }
         }
     }
 
@@ -257,12 +259,15 @@ final class OracleModel {
         // Oracle; if its CLI conversation can't be resumed, fall back to a fresh spawn.
         if let recent = oracleSessions.first {
             Task {
-                await app.reactivate(recent.id)
-                if app.liveSession(recent.id) != nil {
-                    oracleSessionId = recent.id
-                } else {
-                    // Couldn't revive it — start fresh and clear the resume error so the
-                    // dock doesn't show a stale "no conversation to resume" banner.
+                // Point the chat at it up front so the resumed pty is visible while it
+                // boots; resume into the dock grid (not the wide main-window grid) so
+                // the CLI doesn't wrap into garbage inside the drawer.
+                oracleSessionId = recent.id
+                let resumed = await app.reactivate(recent.id, grid: dockGrid)
+                if !resumed {
+                    // Couldn't revive its prior conversation (stale/absent CLI session) —
+                    // start fresh and clear the resume error so the dock doesn't show a
+                    // stale "no conversation to resume" banner.
                     app.errorMessage = nil
                     spawnAgent()
                 }
