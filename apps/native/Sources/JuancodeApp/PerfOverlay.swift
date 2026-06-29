@@ -21,9 +21,9 @@ struct PerfOverlay: View {
             }
             .font(.system(size: 10, weight: .medium).monospaced())
             .padding(8)
-            .background(Color.black.opacity(0.72))
+            .background(Color.appSurface.opacity(0.72))
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.15)))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.appHairline(0.15)))
             .padding(10)
             .allowsHitTesting(false)
         }

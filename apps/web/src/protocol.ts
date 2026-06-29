@@ -496,6 +496,8 @@ export interface PullRequest {
   checks: PrChecks;
   /** GitHub login of the PR author (empty if unknown). */
   author: string;
+  /** Count of unresolved review threads ("unaddressed" conversations). 0 when none or unknown. */
+  unresolvedComments: number;
 }
 
 /** Result of listing a folder's open PRs. */

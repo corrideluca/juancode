@@ -23,7 +23,7 @@ struct BottomTerminalPanel: View {
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
+        .background(Color.appSurface)
     }
 
     private var tabStrip: some View {
@@ -123,7 +123,7 @@ struct BottomTerminalPanel: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .id(pane)
         } else {
-            Color.black
+            Color.appSurface
                 .overlay(Text("Shell exited").font(.system(size: 11)).foregroundStyle(.secondary))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .id(pane)

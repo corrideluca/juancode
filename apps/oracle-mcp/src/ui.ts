@@ -439,6 +439,48 @@ export const consoleHtml = /* html */ `<!doctype html>
   }
   .sdel:active { background: var(--panel-2); color: var(--bad); }
 
+  /* ── Settings (keyboard shortcuts) ── */
+  .gear {
+    flex: none; margin-left: 8px; width: 34px; height: 34px; border-radius: 999px;
+    display: grid; place-items: center; font-size: 16px; cursor: pointer;
+    color: var(--dim); background: var(--panel); border: none;
+    box-shadow: inset 0 0 0 1px var(--line-soft);
+  }
+  .gear:active { background: var(--panel-2); color: var(--txt); }
+  .modal-back {
+    position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+    padding: 18px; background: rgba(5,7,12,.6); backdrop-filter: blur(3px);
+  }
+  .modal-back[hidden] { display: none; }
+  .modal {
+    width: 100%; max-width: 460px; max-height: 84vh; overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: 0 18px 50px rgba(0,0,0,.5); padding: 16px;
+  }
+  .modal h2 { font-size: 15px; margin: 0 0 2px; }
+  .modal .hint { color: var(--dim); font-size: 12px; margin: 0 0 14px; }
+  .sc-row {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 11px 0; border-top: 1px solid var(--line-soft);
+  }
+  .sc-row .sc-name { flex: 1 1 100%; font-size: 13.5px; }
+  .sc-row .sc-name small { color: var(--faint); font-weight: 400; }
+  .sc-chip {
+    min-width: 34px; height: 32px; padding: 0 8px; border-radius: var(--radius-sm);
+    font: 600 13px/1 ui-monospace, Menlo, monospace; cursor: pointer; color: var(--dim);
+    background: var(--panel-2); border: none; box-shadow: inset 0 0 0 1px var(--line-soft);
+  }
+  .sc-chip.on { color: var(--tint-ink); background: var(--tint); box-shadow: none; }
+  .sc-key {
+    width: 52px; height: 32px; text-align: center; border-radius: var(--radius-sm);
+    background: var(--panel-2); color: var(--txt); border: none;
+    box-shadow: inset 0 0 0 1px var(--line-soft); font: 600 13px/1 ui-monospace, Menlo, monospace;
+  }
+  .sc-reset { margin-left: auto; background: none; border: none; color: var(--faint); cursor: pointer; font-size: 16px; }
+  .sc-static { color: var(--faint); font: 600 12px/1 ui-monospace, Menlo, monospace; }
+  .modal-foot { display: flex; gap: 8px; margin-top: 16px; }
+  .modal-foot .btn-ghost { background: none; box-shadow: inset 0 0 0 1px var(--line); color: var(--dim); }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .001ms !important; transition: none !important; }
   }
@@ -449,6 +491,7 @@ export const consoleHtml = /* html */ `<!doctype html>
     <span class="mark">✦</span>
     <span class="brand"><h1>Oracle</h1><span class="sub">Console</span></span>
     <span id="conn" class="conn"><span class="dot"></span><span id="conn-txt">link…</span></span>
+    <button id="settings-btn" class="gear" aria-label="Keyboard shortcuts">⚙</button>
   </header>
 
   <nav>
@@ -537,6 +580,19 @@ export const consoleHtml = /* html */ `<!doctype html>
       </div>
     </section>
   </main>
+
+  <!-- ── Settings: keyboard shortcuts ───────────────────── -->
+  <div id="settings-modal" class="modal-back" hidden>
+    <div class="modal" role="dialog" aria-label="Keyboard shortcuts">
+      <h2>Keyboard shortcuts</h2>
+      <p class="hint">Edit the combo, then it applies right away. Some browsers reserve ⌘N/Ctrl+N for a new window — if it doesn't fire, rebind to a free combo.</p>
+      <div id="sc-list"></div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" id="sc-reset-all">Reset all</button>
+        <button class="btn" id="sc-close">Done</button>
+      </div>
+    </div>
+  </div>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -658,7 +714,7 @@ async function loadSessions(){
       + '<div class="meta"><span class="mono">'+esc(s.cwd||"")+'</span>'
       + (s.status?'<span class="badge '+(live?"b-ready":"b-closed")+'">'+esc(s.status)+'</span>':'')+'</div>';
       if (!live || !id) return '<div class="card item">'+head+'</div>';
-      return '<div class="card item sess" data-id="'+id+'">'+head
+      return '<div class="card item sess" data-id="'+id+'" data-cwd="'+esc(s.cwd||"")+'" data-prov="'+esc(s.provider||"")+'">'+head
       + '<div class="reply-hint">Tap to reply →</div>'
       + '<div class="sreply" hidden>'
       + '<textarea class="sreply-in" placeholder="Reply to this agent…" rows="1"></textarea>'
@@ -693,6 +749,7 @@ function openSessionReply(id){
   if (!card) return;
   const box = card.querySelector(".sreply"), hint = card.querySelector(".reply-hint");
   if (!box) return;
+  rememberProject(card);
   box.hidden = false; if (hint) hint.hidden = true;
   const ta = box.querySelector("textarea"); if (ta) ta.focus();
   card.scrollIntoView({ block: "center" });
@@ -728,6 +785,7 @@ $("#sessions-list").addEventListener("click", (e) => {
   if (e.target.closest && e.target.closest(".sreply")) return; // typing — don't toggle
   const card = e.target.closest && e.target.closest(".sess[data-id]");
   if (!card) return;
+  rememberProject(card); // so Ctrl/⌘+N can open a new session on this project
   const box = card.querySelector(".sreply"), hint = card.querySelector(".reply-hint");
   if (!box) return;
   const show = box.hidden; box.hidden = !show; if (hint) hint.hidden = show;
@@ -745,6 +803,101 @@ $("#sessions-list").addEventListener("keydown", (e) => {
     e.preventDefault(); sendReply(t.closest(".sess"));
   }
 });
+
+// ── Keyboard shortcuts (juancode-oe4) ─────────────────────
+// Editable, localStorage-backed. Each binding is { mod, shift, alt, key } where
+// mod means Ctrl OR Cmd (so one combo works on every platform). Only newSession
+// is rebindable here; the in-textarea Enter/Shift+Enter behaviour is shown for
+// reference. New session mirrors the native Cmd-N: dispatch on the current project.
+const SC_KEY = "oracle-shortcuts";
+const SC_DEFAULTS = { newSession: { mod: true, shift: false, alt: false, key: "n" } };
+const SC_LABELS = { newSession: "New session on current project" };
+function loadShortcuts(){
+  try {
+    const raw = localStorage.getItem(SC_KEY);
+    if (raw) return Object.assign({}, SC_DEFAULTS, JSON.parse(raw));
+  } catch(_){}
+  return JSON.parse(JSON.stringify(SC_DEFAULTS));
+}
+let shortcuts = loadShortcuts();
+function saveShortcuts(){ try { localStorage.setItem(SC_KEY, JSON.stringify(shortcuts)); } catch(_){} }
+function scDisplay(b){
+  if (!b || !b.key) return "—";
+  let s = "";
+  if (b.mod) s += "⌘/Ctrl+";
+  if (b.alt) s += "⌥+";
+  if (b.shift) s += "⇧+";
+  return s + (b.key === " " ? "Space" : b.key.toUpperCase());
+}
+function scMatch(b, e){
+  if (!b || !b.key) return false;
+  const modOk = b.mod ? (e.ctrlKey || e.metaKey) : (!e.ctrlKey && !e.metaKey);
+  const key = (e.key || "").toLowerCase();
+  return modOk && e.shiftKey === !!b.shift && e.altKey === !!b.alt && key === b.key.toLowerCase();
+}
+
+// The project a new session should target: the last session card you opened,
+// falling back to whatever's already typed in the dispatch form, persisted so it
+// survives reloads.
+const LAST_PROJ_KEY = "oracle-last-project";
+let lastProject = null;
+try { lastProject = JSON.parse(localStorage.getItem(LAST_PROJ_KEY) || "null"); } catch(_){ lastProject = null; }
+function rememberProject(card){
+  if (!card || !card.dataset.cwd) return;
+  lastProject = { cwd: card.dataset.cwd, provider: card.dataset.prov || "" };
+  try { localStorage.setItem(LAST_PROJ_KEY, JSON.stringify(lastProject)); } catch(_){}
+}
+function newSessionOnCurrentProject(){
+  const sessTab = document.querySelector('nav button[data-tab="sessions"]');
+  if (sessTab) sessTab.click();
+  const proj = (lastProject && lastProject.cwd) || $("#d-project").value.trim();
+  const det = $("#sessions details"); if (det) det.open = true;
+  if (proj) $("#d-project").value = proj;
+  if (lastProject && lastProject.provider) $("#d-prov").value = lastProject.provider;
+  const prompt = $("#d-prompt"); if (prompt) prompt.focus();
+}
+
+window.addEventListener("keydown", (e) => {
+  if (document.getElementById("settings-modal").hidden === false) return; // editing combos
+  if (scMatch(shortcuts.newSession, e)) { e.preventDefault(); newSessionOnCurrentProject(); }
+});
+
+// ── Settings modal ────────────────────────────────────────
+function renderShortcuts(){
+  const mods = [["mod","⌘/Ctrl"],["shift","⇧"],["alt","⌥"]];
+  const editable = Object.keys(SC_DEFAULTS).map((id) => {
+    const b = shortcuts[id];
+    const chips = mods.map(([k,sym]) =>
+      '<button class="sc-chip'+(b[k]?" on":"")+'" data-sc="'+id+'" data-mod="'+k+'">'+sym+'</button>').join("");
+    return '<div class="sc-row"><div class="sc-name">'+esc(SC_LABELS[id])+'</div>'
+      + chips
+      + '<input class="sc-key" data-sc="'+id+'" data-key="1" maxlength="5" value="'+esc(b.key === " " ? "space" : b.key)+'" />'
+      + '<button class="sc-reset" data-sc="'+id+'" data-reset="1" aria-label="Reset">↺</button></div>';
+  }).join("");
+  const fixed = '<div class="sc-row"><div class="sc-name">Send reply / message <small>in a text box</small></div>'
+    + '<span class="sc-static">Enter · ⇧Enter = newline</span></div>';
+  $("#sc-list").innerHTML = editable + fixed;
+}
+function openSettings(){ renderShortcuts(); $("#settings-modal").hidden = false; }
+function closeSettings(){ $("#settings-modal").hidden = true; }
+$("#settings-btn").onclick = openSettings;
+$("#sc-close").onclick = closeSettings;
+$("#sc-reset-all").onclick = () => { shortcuts = JSON.parse(JSON.stringify(SC_DEFAULTS)); saveShortcuts(); renderShortcuts(); };
+$("#settings-modal").addEventListener("click", (e) => { if (e.target.id === "settings-modal") closeSettings(); });
+$("#sc-list").addEventListener("click", (e) => {
+  const chip = e.target.closest && e.target.closest(".sc-chip");
+  if (chip) { const id = chip.dataset.sc, m = chip.dataset.mod; shortcuts[id][m] = !shortcuts[id][m]; saveShortcuts(); renderShortcuts(); return; }
+  const reset = e.target.closest && e.target.closest("[data-reset]");
+  if (reset) { const id = reset.dataset.sc; shortcuts[id] = JSON.parse(JSON.stringify(SC_DEFAULTS[id])); saveShortcuts(); renderShortcuts(); }
+});
+$("#sc-list").addEventListener("change", (e) => {
+  const inp = e.target.closest && e.target.closest("[data-key]");
+  if (!inp) return;
+  const v = inp.value.trim().toLowerCase();
+  shortcuts[inp.dataset.sc].key = (v === "space" || v === " ") ? " " : (v.slice(-1) || "");
+  saveShortcuts(); renderShortcuts();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#settings-modal").hidden) closeSettings(); });
 
 // ── Chat ──────────────────────────────────────────────────
 // Minimal, XSS-safe markdown: escape first, then **bold**, \`code\`, bullets.

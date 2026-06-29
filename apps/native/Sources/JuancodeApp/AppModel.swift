@@ -285,6 +285,23 @@ final class AppModel {
         didSet { UserDefaults.standard.set(notifyOnTurnEnd, forKey: notifyDefaultsKey) }
     }
 
+    /// Light / dark / follow-system appearance (juancode light/dark toggle). Persisted;
+    /// drives the SwiftUI `preferredColorScheme` (RootView) and the AppKit window chrome
+    /// (`applyAppearance`). Defaults to dark to preserve the app's pure-black look.
+    var themePreference: ThemePreference = .persisted {
+        didSet {
+            UserDefaults.standard.set(themePreference.rawValue, forKey: ThemePreference.defaultsKey)
+            applyAppearance()
+        }
+    }
+
+    /// Push `themePreference` to the AppKit layer (title bar, menus, scrollers). The
+    /// SwiftUI content tree follows via RootView's `preferredColorScheme`. `nil`
+    /// appearance means "follow the system" (the `.system` choice).
+    func applyAppearance() {
+        NSApp.appearance = themePreference.nsAppearance
+    }
+
     /// While on, hold a power assertion that blocks the Mac from idle-sleeping, so a
     /// long-running prompt isn't cut off when you step away (the app already opts out
     /// of App Nap in `AppDelegate`, but that variant still permits idle system sleep —

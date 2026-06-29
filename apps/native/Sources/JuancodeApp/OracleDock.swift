@@ -88,9 +88,9 @@ struct OracleDock: View {
             .frame(width: w)
         }
         .frame(maxHeight: .infinity)
-        .background(Color(white: 0.07))
+        .background(Color.appPanel)
         .overlay(alignment: .leading) {
-            Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1)
+            Rectangle().fill(Color.appHairline(0.12)).frame(width: 1)
         }
         .shadow(radius: 24, x: -6)
         // Esc closes it (the close button mirrors this). Only while expanded — the
@@ -198,7 +198,7 @@ private struct OracleTabBar: View {
         .padding(4)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.white.opacity(0.05))
+                .fill(Color.appHairline(0.05))
         )
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -513,7 +513,7 @@ private struct OracleSessionRail: View {
             }
         }
         .frame(maxHeight: .infinity)
-        .background(Color(white: 0.10))
+        .background(Color.appPanelElevated)
     }
 
     /// `number` labels Oracles in spawn order (oldest = 1) so several read distinctly,

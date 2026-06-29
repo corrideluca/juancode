@@ -24,6 +24,17 @@ const TRACK_STYLE: Record<TrackState, { text: string; label: string }> = {
 };
 
 const POPOVER_WIDTH = 288; // w-72
+const POPOVER_MAX_HEIGHT = 320; // formerly the static max-h-80
+const VIEWPORT_MARGIN = 8;
+
+/** Where the portal popover is anchored, and how tall it may grow. */
+interface PopoverPos {
+  /** Anchored by its top edge (opens downward) or its bottom edge (opens upward). */
+  top?: number;
+  bottom?: number;
+  left: number;
+  maxHeight: number;
+}
 
 interface Props {
   cwd: string;
@@ -46,7 +57,7 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
   const [query, setQuery] = useState("");
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [pos, setPos] = useState<PopoverPos | null>(null);
   const prs = useQuery({
     queryKey: ["prs", cwd],
     queryFn: () => api.prs(cwd),
@@ -63,7 +74,16 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
       const r = btnRef.current?.getBoundingClientRect();
       if (!r) return;
       const left = Math.max(8, Math.min(r.right - POPOVER_WIDTH, window.innerWidth - POPOVER_WIDTH - 8));
-      setPos({ top: r.bottom + 4, left });
+      // Bound the popover to the viewport so a long PR list scrolls inside it
+      // instead of overflowing off-screen. Open upward when there's more room
+      // above the badge than below (e.g. the folder sits low in the sidebar).
+      const below = window.innerHeight - r.bottom - VIEWPORT_MARGIN;
+      const above = r.top - VIEWPORT_MARGIN;
+      if (below >= above) {
+        setPos({ top: r.bottom + 4, left, maxHeight: Math.min(POPOVER_MAX_HEIGHT, below) });
+      } else {
+        setPos({ bottom: window.innerHeight - r.top + 4, left, maxHeight: Math.min(POPOVER_MAX_HEIGHT, above) });
+      }
     };
     place();
     window.addEventListener("scroll", place, true);
@@ -129,8 +149,15 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
           <div
             ref={popRef}
             onClick={(e) => e.stopPropagation()}
-            style={{ position: "fixed", top: pos.top, left: pos.left, width: POPOVER_WIDTH }}
-            className="z-50 max-h-80 overflow-y-auto rounded-md border border-neutral-700 bg-neutral-900 pb-1 shadow-lg"
+            style={{
+              position: "fixed",
+              top: pos.top,
+              bottom: pos.bottom,
+              left: pos.left,
+              width: POPOVER_WIDTH,
+              maxHeight: pos.maxHeight,
+            }}
+            className="z-50 overflow-y-auto rounded-md border border-neutral-700 bg-neutral-900 pb-1 shadow-lg"
           >
           <div className="sticky top-0 z-10 flex items-center gap-1.5 border-b border-neutral-800 bg-neutral-900 px-2 py-1.5">
             <input
@@ -154,6 +181,16 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
                 Mine ({mineCount})
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => void prs.refetch()}
+              disabled={prs.isFetching}
+              title="Refresh PRs"
+              aria-label="Refresh PRs"
+              className="shrink-0 rounded px-1.5 py-1 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-neutral-200 disabled:opacity-60"
+            >
+              <span className={`block text-[11px] leading-none ${prs.isFetching ? "animate-spin" : ""}`}>↻</span>
+            </button>
           </div>
           {list.length === 0 && (
             <div className="px-2 py-2 text-center text-[11px] text-neutral-500">
@@ -204,6 +241,14 @@ function PrRow({ pr, cwd, onSpawn }: { pr: PullRequest; cwd: string; onSpawn: ()
         </a>
         {pr.draft && (
           <span className="shrink-0 rounded bg-neutral-700 px-1 text-[9px] text-neutral-300">draft</span>
+        )}
+        {pr.unresolvedComments > 0 && (
+          <span
+            className="ml-auto shrink-0 rounded bg-amber-500/15 px-1 text-[9px] font-medium text-amber-300"
+            title={`${pr.unresolvedComments} unresolved comment${pr.unresolvedComments === 1 ? "" : "s"}`}
+          >
+            💬 {pr.unresolvedComments}
+          </span>
         )}
       </div>
       <div className="mt-1 flex items-center gap-2 pl-3 text-[11px]">

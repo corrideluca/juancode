@@ -56,7 +56,63 @@ export function parsePrs(raw: RawPr[]): PullRequest[] {
     draft: p.isDraft,
     checks: rollupChecks(p.statusCheckRollup),
     author: p.author?.login ?? "",
+    unresolvedComments: 0,
   }));
+}
+
+/** Parse `owner`/`repo` from a GitHub PR url (works for github.com and GHE hosts). */
+export function ownerRepoFromUrl(url: string): { owner: string; repo: string } | null {
+  const m = url.match(/[/:]([^/]+)\/([^/]+)\/pull\/\d+/);
+  return m ? { owner: m[1]!, repo: m[2]! } : null;
+}
+
+/**
+ * One GraphQL query fetching every open PR's review-thread resolution state for a
+ * repo — counting unresolved threads ("unaddressed" conversations) for the list
+ * badge without an N+1 call per PR. `gh pr list --json` can't surface this.
+ */
+const UNRESOLVED_QUERY = `query($owner:String!,$repo:String!){
+  repository(owner:$owner,name:$repo){
+    pullRequests(states:OPEN, first:100){
+      nodes{ number reviewThreads(first:100){ nodes{ isResolved } } }
+    }
+  }
+}`;
+
+interface RawThreadPr {
+  number?: number;
+  reviewThreads?: { nodes?: ({ isResolved?: boolean } | null)[] | null } | null;
+}
+interface RawUnresolved {
+  data?: { repository?: { pullRequests?: { nodes?: (RawThreadPr | null)[] | null } | null } | null } | null;
+}
+
+/** Map the GraphQL response to a `prNumber → unresolved-thread count`. Exported for testing. */
+export function parseUnresolvedCounts(raw: RawUnresolved): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const pr of raw.data?.repository?.pullRequests?.nodes ?? []) {
+    if (!pr || typeof pr.number !== "number") continue;
+    const n = (pr.reviewThreads?.nodes ?? []).reduce(
+      (acc, t) => acc + (t && t.isResolved === false ? 1 : 0),
+      0,
+    );
+    out.set(pr.number, n);
+  }
+  return out;
+}
+
+/** Best-effort unresolved-thread counts for a repo's open PRs; empty map on any failure. */
+async function getUnresolvedCounts(cwd: string, owner: string, repo: string): Promise<Map<number, number>> {
+  try {
+    const { stdout } = await exec(
+      "gh",
+      ["api", "graphql", "-f", `query=${UNRESOLVED_QUERY}`, "-f", `owner=${owner}`, "-f", `repo=${repo}`],
+      { cwd, maxBuffer: MAX_BUFFER },
+    );
+    return parseUnresolvedCounts(JSON.parse(stdout) as RawUnresolved);
+  } catch {
+    return new Map();
+  }
 }
 
 /**
@@ -93,12 +149,21 @@ export async function getOpenPrs(cwd: string): Promise<PrListResult> {
   } catch (err) {
     return { available: false, prs: [], error: ghErrorReason(err) };
   }
+  let prs: PullRequest[];
   try {
-    const raw = JSON.parse(stdout) as RawPr[];
-    return { available: true, prs: parsePrs(raw), viewer: await getViewerLogin(cwd) };
+    prs = parsePrs(JSON.parse(stdout) as RawPr[]);
   } catch {
     return { available: false, prs: [], error: "Could not parse gh output" };
   }
+  const ownerRepo = prs.length ? ownerRepoFromUrl(prs[0]!.url) : null;
+  const [viewer, counts] = await Promise.all([
+    getViewerLogin(cwd),
+    ownerRepo
+      ? getUnresolvedCounts(cwd, ownerRepo.owner, ownerRepo.repo)
+      : Promise.resolve(new Map<number, number>()),
+  ]);
+  for (const pr of prs) pr.unresolvedComments = counts.get(pr.number) ?? 0;
+  return { available: true, prs, viewer };
 }
 
 /**

@@ -11,6 +11,7 @@ const pr = (over: Partial<PullRequest> = {}): PullRequest => ({
   draft: false,
   checks: "passing",
   author: "alice",
+  unresolvedComments: 0,
   ...over,
 });
 

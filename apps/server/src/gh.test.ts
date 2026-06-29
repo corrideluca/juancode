@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parsePrActivity, parsePrs, rollupChecks } from "./gh.ts";
+import {
+  ownerRepoFromUrl,
+  parsePrActivity,
+  parsePrs,
+  parseUnresolvedCounts,
+  rollupChecks,
+} from "./gh.ts";
 
 describe("rollupChecks", () => {
   it("returns none for empty or missing checks", () => {
@@ -79,6 +85,7 @@ describe("parsePrs", () => {
         draft: false,
         checks: "passing",
         author: "octocat",
+        unresolvedComments: 0,
       },
       {
         number: 7,
@@ -88,8 +95,50 @@ describe("parsePrs", () => {
         draft: true,
         checks: "none",
         author: "",
+        unresolvedComments: 0,
       },
     ]);
+  });
+});
+
+describe("ownerRepoFromUrl", () => {
+  it("extracts owner/repo from a PR url", () => {
+    expect(ownerRepoFromUrl("https://github.com/octo/widgets/pull/42")).toEqual({
+      owner: "octo",
+      repo: "widgets",
+    });
+  });
+
+  it("returns null for a non-PR url", () => {
+    expect(ownerRepoFromUrl("https://github.com/octo/widgets")).toBeNull();
+  });
+});
+
+describe("parseUnresolvedCounts", () => {
+  it("counts only unresolved threads per PR", () => {
+    const counts = parseUnresolvedCounts({
+      data: {
+        repository: {
+          pullRequests: {
+            nodes: [
+              {
+                number: 42,
+                reviewThreads: {
+                  nodes: [{ isResolved: false }, { isResolved: true }, { isResolved: false }],
+                },
+              },
+              { number: 7, reviewThreads: { nodes: [{ isResolved: true }] } },
+            ],
+          },
+        },
+      },
+    });
+    expect(counts.get(42)).toBe(2);
+    expect(counts.get(7)).toBe(0);
+  });
+
+  it("returns an empty map for a malformed response", () => {
+    expect(parseUnresolvedCounts({}).size).toBe(0);
   });
 });
 

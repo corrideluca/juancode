@@ -105,9 +105,9 @@ struct EditorOverlay: View {
             SwiftTermEphemeral(pty: pty, onExit: onExit)
                 .background(Color.black)
         }
-        .background(Color(white: 0.07))
+        .background(Color.appPanel)
         .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.appHairline(0.12)))
         .shadow(radius: 30)
         // Drag the right / bottom edge to resize; the size is remembered app-wide.
         .overlay(alignment: .trailing) {

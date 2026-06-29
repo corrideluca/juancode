@@ -56,9 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         }
 
-        // Match the terminal: force a dark, pure-black window chrome instead of the
-        // default system gray so the SwiftUI panels blend into the SwiftTerm views.
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        // Apply the user's saved appearance (juancode light/dark toggle) to the window
+        // chrome at launch; defaults to dark to preserve the app's pure-black look that
+        // blends into the SwiftTerm views. Runtime changes go through
+        // `AppModel.applyAppearance`. The SwiftUI tree follows via RootView's
+        // `preferredColorScheme`.
+        NSApp.appearance = ThemePreference.persisted.nsAppearance
 
         // Make terminal Ctrl-C (SIGINT) and SIGTERM quit the app cleanly. The GUI
         // run loop doesn't honour the default SIGINT disposition, so we monitor
@@ -101,6 +104,7 @@ struct JuancodeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model: AppModel
     @State private var oracle: OracleModel
+    @State private var shortcuts = Shortcuts()
 
     init() {
         let state: AppState
@@ -140,19 +144,21 @@ struct JuancodeApp: App {
         .commands {
             CommandGroup(after: .newItem) {
                 // ⌘N clones the selected session's agent + cwd (sheet when nothing
-                // is selected); ⌘⇧N always opens the full New Session sheet.
+                // is selected); ⌘⇧N always opens the full New Session sheet. All
+                // these key-equivalents are user-rebindable (juancode-oe4) — see
+                // Shortcuts.swift and the Settings → Shortcuts pane.
                 Button("New Session (same agent & folder)") { model.quickNewSession() }
-                    .keyboardShortcut("n", modifiers: [.command])
+                    .appShortcut(.newSessionSameProject, shortcuts)
                 Button("New Session…") { model.showingNewSession = true }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .appShortcut(.newSessionSheet, shortcuts)
                 // ⌘K opens the prompt-template palette: pick a saved prompt and
                 // insert (or insert+send) it into the active session (juancode-2vd).
                 Button("Prompt Templates…") { model.showingPromptPalette = true }
-                    .keyboardShortcut("k", modifiers: [.command])
+                    .appShortcut(.promptTemplates, shortcuts)
             }
             CommandGroup(after: .toolbar) {
                 Button("Toggle Performance HUD") { PerfMonitor.shared.visible.toggle() }
-                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .appShortcut(.togglePerfHud, shortcuts)
                 Toggle("Turn-End Notifications", isOn: Binding(
                     get: { model.notifyOnTurnEnd },
                     set: { model.notifyOnTurnEnd = $0 }))
@@ -161,18 +167,24 @@ struct JuancodeApp: App {
                 Toggle("Keep Awake", isOn: Binding(
                     get: { model.keepAwake },
                     set: { model.keepAwake = $0 }))
-                    .keyboardShortcut("a", modifiers: [.control, .shift])
+                    .appShortcut(.keepAwake, shortcuts)
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
                 Button("Toggle Terminal") { model.toggleBottomTerminal() }
-                    .keyboardShortcut("t", modifiers: [.control])
+                    .appShortcut(.toggleTerminal, shortcuts)
                 // Global Oracle + issues access (juancode-6sw). ⌃Space toggles the
                 // Oracle panel from anywhere; ⌘⇧I jumps straight to global issues.
                 Button("Oracle") { oracle.toggleChatFocused() }
-                    .keyboardShortcut(.space, modifiers: [.control])
+                    .appShortcut(.oracle, shortcuts)
                 Button("Global Issues") { oracle.open(tab: .issues) }
-                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                    .appShortcut(.globalIssues, shortcuts)
             }
+        }
+
+        // Standard ⌘, Settings window — hosts the editable shortcuts pane.
+        Settings {
+            ShortcutSettingsView()
+                .environment(shortcuts)
         }
     }
 }

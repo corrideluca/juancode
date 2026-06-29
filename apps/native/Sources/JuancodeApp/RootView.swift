@@ -16,8 +16,8 @@ struct RootView: View {
         } detail: {
             DetailView()
         }
-        .preferredColorScheme(.dark)
-        .background(WindowBackground(color: .black))
+        .preferredColorScheme(model.themePreference.colorScheme)
+        .background(WindowBackground(color: .appWindow))
         // Window-scoped key monitor for vim sidebar nav + ⌃H/⌃L pane focus (juancode-vgm).
         .background(PaneNavInstaller(model: model).frame(width: 0, height: 0))
         // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs and
@@ -65,6 +65,24 @@ struct RootView: View {
                     Label("Oracle", systemImage: "sparkles")
                 }
                 .help("Oracle — global orchestration (⌃Space)")
+                .clickCursor()
+                // Appearance toggle (juancode light/dark): click cycles
+                // System → Light → Dark; the dropdown picks one directly.
+                Menu {
+                    Picker("Appearance", selection: $model.themePreference) {
+                        ForEach(ThemePreference.allCases) { pref in
+                            Label(pref.label, systemImage: pref.symbol).tag(pref)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } label: {
+                    Label("Appearance", systemImage: model.themePreference.symbol)
+                } primaryAction: {
+                    model.themePreference = model.themePreference.next
+                }
+                .menuIndicator(.hidden)
+                .help("Appearance: \(model.themePreference.label) — click to cycle, or pick")
                 .clickCursor()
             }
         }
@@ -387,7 +405,7 @@ struct SidebarView: View {
                             Text(group.name)
                                 .font(.system(size: 12, weight: .semibold))
                                 .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(Color.black.opacity(0.8))
+                                .background(Color.appSurface.opacity(0.8))
                         }
                         .dropDestination(for: String.self) { items, _ in
                             dropTarget = nil
@@ -453,7 +471,7 @@ struct SidebarView: View {
                 .padding(.vertical, 4)
             }
         }
-        .background(Color.black)
+        .background(Color.appSurface)
         .onAppear { model.loadExternalSessions(); model.navOrder = visibleOrderedIDs }
         .toolbar {
             ToolbarItem {
@@ -703,7 +721,7 @@ private struct FolderHeader: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.white.opacity(0.06)))
+                .fill(Color.appHairline(0.06)))
         .padding(.horizontal, 6)
         .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd) }
     }
@@ -1366,7 +1384,7 @@ struct SessionContainer: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
+        .background(Color.appSurface)
     }
 
     @ViewBuilder
