@@ -438,6 +438,7 @@ export const consoleHtml = /* html */ `<!doctype html>
     border-radius: 8px;
   }
   .sdel:active { background: var(--panel-2); color: var(--bad); }
+  .sdel.armed { background: var(--bad); color: #fff; font-size: 12px; font-weight: 600; padding: 5px 9px; }
 
   /* ── Settings (keyboard shortcuts) ── */
   .gear {
@@ -768,18 +769,31 @@ async function sendReply(card){
   if (btn) btn.disabled = false;
 }
 // Permanently delete a session (kills its pty + removes any auto-created worktree on
-// the Mac, via the native app). Destructive, so confirm first.
-async function deleteSessionCard(id){
+// the Mac, via the native app). Destructive, so confirm first — but via an inline
+// two-tap arm rather than window.confirm(), which is a silent no-op in an installed
+// iOS standalone PWA (the home-screen console) and so swallowed the delete entirely.
+// First tap arms the ✕ (shows "Delete?"), a second tap within 3s actually deletes.
+async function deleteSessionCard(btn){
+  const id = btn && btn.dataset.del;
   if (!id) return;
-  if (!confirm("Delete this session? This kills the agent and removes its worktree.")) return;
+  if (!btn.classList.contains("armed")){
+    btn.classList.add("armed"); btn.textContent = "Delete?";
+    clearTimeout(btn._disarm);
+    btn._disarm = setTimeout(() => { btn.classList.remove("armed"); btn.textContent = "✕"; }, 3000);
+    return;
+  }
+  clearTimeout(btn._disarm); btn.disabled = true;
   try {
     await api("/api/sessions/delete", { method:"POST", body: JSON.stringify({ id }) }); setConn(true);
     await loadSessions();
-  } catch(e){ setConn(false); alert("Couldn't delete the session: " + e.message); }
+  } catch(e){
+    setConn(false); btn.disabled = false; btn.classList.remove("armed"); btn.textContent = "✕";
+    alert("Couldn't delete the session: " + e.message);
+  }
 }
 $("#sessions-list").addEventListener("click", (e) => {
   const delBtn = e.target.closest && e.target.closest("[data-del]");
-  if (delBtn) { e.stopPropagation(); deleteSessionCard(delBtn.dataset.del); return; }
+  if (delBtn) { e.stopPropagation(); deleteSessionCard(delBtn); return; }
   const sendBtn = e.target.closest && e.target.closest(".sreply-send");
   if (sendBtn) { sendReply(sendBtn.closest(".sess")); return; }
   if (e.target.closest && e.target.closest(".sreply")) return; // typing — don't toggle
