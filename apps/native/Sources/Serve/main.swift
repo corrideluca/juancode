@@ -14,16 +14,11 @@ let host = Config.bindHost
 let webDist = (FileManager.default.currentDirectoryPath as NSString)
     .appendingPathComponent("../web/dist")
 
-let auth = AuthConfig(token: Config.remoteToken)
 print("juancode-serve listening on http://\(host):\(Config.port)")
-print(auth.isEnabled
-    ? "  auth: ENABLED — token required on HTTP + WS"
-    : "  auth: disabled (set JUANCODE_TOKEN, or call ensureRemoteToken, to require a token for remote access)")
 
 try await JuancodeServer.run(
     state: state,
     host: host,
     port: Config.port,
-    webDist: FileManager.default.fileExists(atPath: webDist) ? webDist : nil,
-    auth: auth
+    webDist: FileManager.default.fileExists(atPath: webDist) ? webDist : nil
 )
