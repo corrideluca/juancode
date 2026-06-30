@@ -181,10 +181,16 @@ struct JuancodeApp: App {
             }
         }
 
-        // Standard ⌘, Settings window — hosts the editable shortcuts pane.
+        // Standard ⌘, Settings window — editable shortcuts + session behaviour.
         Settings {
-            ShortcutSettingsView()
-                .environment(shortcuts)
+            TabView {
+                ShortcutSettingsView()
+                    .environment(shortcuts)
+                    .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+                SessionSettingsView()
+                    .environment(model)
+                    .tabItem { Label("Sessions", systemImage: "rectangle.stack") }
+            }
         }
     }
 }

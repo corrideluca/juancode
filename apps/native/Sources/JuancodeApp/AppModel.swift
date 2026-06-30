@@ -12,6 +12,10 @@ private let notifyDefaultsKey = "juancode.notify.turnEnd"
 /// UserDefaults key for the "keep awake" toggle (block idle system sleep).
 private let keepAwakeDefaultsKey = "juancode.keepAwake"
 
+/// UserDefaults key for the auto-close-idle-sessions threshold, in minutes
+/// (`0` = never / disabled).
+private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
+
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
@@ -330,6 +334,14 @@ final class AppModel {
             ProcessInfo.processInfo.endActivity(token)
             keepAwakeToken = nil
         }
+    }
+
+    /// Auto-close idle sessions: kill (but keep, as a resumable `exited` session)
+    /// any running pty with no output for this many minutes. `0` means never — the
+    /// feature is off. Evaluated on every health tick; default 60 min. Persisted and
+    /// edited from Settings → Sessions (⌘,). See `autoCloseIdleSessions`.
+    var autoCloseIdleMinutes: Int = UserDefaults.standard.object(forKey: autoCloseIdleMinutesKey) as? Int ?? 60 {
+        didSet { UserDefaults.standard.set(autoCloseIdleMinutes, forKey: autoCloseIdleMinutesKey) }
     }
 
     /// User's custom sidebar project order (folder cwds). Folders not listed here
@@ -1409,6 +1421,22 @@ final class AppModel {
                 id: meta.id, status: meta.status, isLive: isLive(meta.id),
                 activity: activity(meta.id), lastOutputMs: meta.updatedAt,
                 resumable: meta.cliSessionId != nil)
+        }
+        // Auto-close long-idle sessions: kill the pty (the exit persists it as a
+        // resumable `exited` session, so it isn't lost — it just stops holding a live
+        // pty). Read each pty's last-output time straight from the live registry —
+        // the published `sessions` snapshot only refreshes on create/exit, so its
+        // `updatedAt` can lag and falsely flag a still-working session. `0` = off.
+        if autoCloseIdleMinutes > 0 {
+            let liveInputs = appState.registry.all().map { s in
+                SessionHealthInput(
+                    id: s.id, status: s.meta.status, isLive: true,
+                    activity: activity(s.id), lastOutputMs: s.meta.updatedAt,
+                    resumable: s.meta.cliSessionId != nil)
+            }
+            for id in SessionHealth.idleToClose(liveInputs, nowMs: now, idleMs: autoCloseIdleMinutes * 60_000) {
+                appState.registry.get(id)?.kill()
+            }
         }
         let reports = SessionHealth.sweep(inputs, nowMs: now)
         // Keep dismissals only for sessions that are still unhealthy; a recovered one
