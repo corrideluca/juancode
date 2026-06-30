@@ -268,7 +268,12 @@ struct SidebarView: View {
     /// When off (default) archived sessions are hidden from the list.
     @State private var showArchived = false
     /// Project folders the user has collapsed (by cwd); their session rows are hidden.
+    /// Projects start collapsed (minimized by default) — see `seenFolders`.
     @State private var collapsedFolders: Set<String> = []
+    /// Project cwds we've already applied the default-collapsed rule to. A folder is
+    /// collapsed the first time it appears; afterwards the user's manual expand/collapse
+    /// is left untouched even as the group list reshuffles.
+    @State private var seenFolders: Set<String> = []
     /// Folders expanded past the preview cap into a fixed-height, internally
     /// scrollable box (by cwd). Otherwise only the first `folderPreviewCount` show.
     @State private var expandedFolders: Set<String> = []
@@ -342,6 +347,15 @@ struct SidebarView: View {
             case (nil, _?): return false
             case (nil, nil): return a.cwd.localizedCompare(b.cwd) == .orderedAscending
             }
+        }
+    }
+
+    /// Collapse any folder we haven't seen before, so projects are minimized by
+    /// default. Already-seen folders keep whatever expand/collapse state the user set.
+    private func collapseNewFolders(_ cwds: [String]) {
+        for cwd in cwds where !seenFolders.contains(cwd) {
+            seenFolders.insert(cwd)
+            collapsedFolders.insert(cwd)
         }
     }
 
@@ -441,6 +455,10 @@ struct SidebarView: View {
             .onChange(of: model.sidebarFocusToken) { _, _ in listFocused = true }
             // Keep the keyboard monitor's nav order in sync with what's actually shown.
             .onChange(of: visibleOrderedIDs) { _, ids in model.navOrder = ids }
+            // Minimize projects by default: collapse each folder the first time it
+            // appears, then leave the user's manual toggles alone (juancode).
+            .onChange(of: groups.map(\.cwd)) { _, cwds in collapseNewFolders(cwds) }
+            .onAppear { collapseNewFolders(groups.map(\.cwd)) }
             // Keep the moved selection on-screen (g/G can jump far).
             .onChange(of: model.selection) { _, sel in
                 guard let sel else { return }
