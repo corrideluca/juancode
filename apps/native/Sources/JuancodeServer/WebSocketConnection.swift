@@ -276,8 +276,14 @@ final class WebSocketConnection: @unchecked Sendable {
                 send(.error(sessionId: nil, message: "Failed to open terminal: \(errMsg(error))"))
             }
 
-        case let .input(sessionId, data):
+        case let .input(sessionId, data, seq):
             resolvePty(sessionId)?.write(Array(data.utf8))
+            // Acknowledge sequenced input so the client can clear it from its
+            // unacked buffer (juancode-1u3). Acked after the write attempt
+            // regardless of whether the pty still exists — the ack means the
+            // server received and processed the frame; a dead pty surfaces via
+            // its own `exit`.
+            if let seq { send(.inputAck(sessionId: sessionId, seq: seq)) }
 
         case let .resize(sessionId, cols, rows):
             resolvePty(sessionId)?.resize(cols: cols, rows: rows)

@@ -64,6 +64,43 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(obj?["capabilities"] as? [String], WireProtocol.capabilities)
     }
 
+    // ── Input acknowledgement + resend (juancode-1u3) ────────────────────────────
+
+    func testDecodesInputWithSeq() throws {
+        let json = #"{"type":"input","sessionId":"s-1","data":"ls\r","seq":7}"#
+        guard case let .input(sessionId, data, seq) = try decode(json) else {
+            return XCTFail("expected .input")
+        }
+        XCTAssertEqual(sessionId, "s-1")
+        XCTAssertEqual(data, "ls\r")
+        XCTAssertEqual(seq, 7)
+    }
+
+    func testDecodesInputWithoutSeqStaysBackCompatible() throws {
+        // Older clients omit `seq`; it must decode to nil, not fail (the server
+        // then just writes without acking).
+        let json = #"{"type":"input","sessionId":"s-1","data":"x"}"#
+        guard case let .input(sessionId, data, seq) = try decode(json) else {
+            return XCTFail("expected .input")
+        }
+        XCTAssertEqual(sessionId, "s-1")
+        XCTAssertEqual(data, "x")
+        XCTAssertNil(seq)
+    }
+
+    func testEncodesInputAck() throws {
+        let msg = ServerMessage.inputAck(sessionId: "s-1", seq: 42)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "inputAck")
+        XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
+        XCTAssertEqual(obj?["seq"] as? Int, 42)
+    }
+
+    func testInputAckCapabilityIsAdvertised() {
+        // Clients feature-detect the ack via `serverInfo` capabilities.
+        XCTAssertTrue(WireProtocol.capabilities.contains("inputAck"))
+    }
+
     // ── Per-session message queue (oracle-cj3 / juancode-r82) ────────────────────
 
     func testDecodesQueueMessage() throws {

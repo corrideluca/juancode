@@ -67,6 +67,7 @@ export function setupWebSocket(server: Server): void {
       "editor",
       "terminal",
       "adoptExternal",
+      "inputAck",
     ];
     send({ type: "serverInfo", protocolVersion: PROTOCOL_VERSION, capabilities: CAPABILITIES });
 
@@ -528,6 +529,12 @@ export function setupWebSocket(server: Server): void {
 
         case "input": {
           resolvePty(msg.sessionId)?.write(msg.data);
+          // Acknowledge sequenced input so the client can clear it from its
+          // unacked buffer (juancode-1u3). Acked after the write attempt
+          // regardless of whether the pty still exists — the ack means the
+          // server received and processed the frame; a dead pty surfaces via
+          // its own `exit`.
+          if (msg.seq !== undefined) send({ type: "inputAck", sessionId: msg.sessionId, seq: msg.seq });
           return;
         }
 

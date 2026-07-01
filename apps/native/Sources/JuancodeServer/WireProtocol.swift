@@ -22,7 +22,11 @@ public enum ClientMessage: Sendable {
     case adoptExternal(provider: String, cliSessionId: String, cwd: String,
                        startMs: Int, cols: Int, rows: Int)
     case setSkipPermissions(sessionId: String, skipPermissions: Bool, cols: Int, rows: Int)
-    case input(sessionId: String, data: String)
+    /// A keystroke / paste for a pty. `seq` is an optional per-connection
+    /// monotonic id (juancode-1u3): when present the server replies with a
+    /// matching `inputAck` after writing, so the client can buffer unacked input
+    /// and resend it on reconnect. Nil for older clients / fire-and-forget writes.
+    case input(sessionId: String, data: String, seq: Int?)
     case resize(sessionId: String, cols: Int, rows: Int)
     case kill(sessionId: String)
     // ── Per-session message queue (oracle-cj3 / juancode-r82) ────────────────────
@@ -60,7 +64,7 @@ public enum ClientMessage: Sendable {
 extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
-        case sessionId, data, file, requestId, cliSessionId, startMs
+        case sessionId, data, file, requestId, cliSessionId, startMs, seq
         // Tracked-PR registry (juancode-bt2).
         case pr, trackedId, notificationId
         // Per-session message queue (oracle-cj3 / juancode-r82).
@@ -103,7 +107,8 @@ extension ClientMessage: Decodable {
                                        rows: try c.decode(Int.self, forKey: .rows))
         case "input":
             self = .input(sessionId: try c.decode(String.self, forKey: .sessionId),
-                          data: try c.decode(String.self, forKey: .data))
+                          data: try c.decode(String.self, forKey: .data),
+                          seq: try c.decodeIfPresent(Int.self, forKey: .seq))
         case "resize":
             self = .resize(sessionId: try c.decode(String.self, forKey: .sessionId),
                            cols: try c.decode(Int.self, forKey: .cols),
@@ -158,7 +163,7 @@ extension ClientMessage: Decodable {
 /// via `serverInfo` rather than assuming parity.
 public enum WireProtocol {
     public static let version = 1
-    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal"]
+    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal", "inputAck"]
 }
 
 public enum ServerMessage: Sendable {
@@ -169,6 +174,10 @@ public enum ServerMessage: Sendable {
     case created(session: SessionMeta)
     case attached(sessionId: String, scrollback: String, session: SessionMeta)
     case output(sessionId: String, data: String)
+    /// Acknowledgement that the server wrote an `input` carrying a `seq`
+    /// (juancode-1u3) — echoes `sessionId` + `seq` so the client clears that
+    /// keystroke from its unacked buffer. Only sent when the input carried a seq.
+    case inputAck(sessionId: String, seq: Int)
     case exit(sessionId: String, exitCode: Int?)
     case activity(sessionId: String, state: SessionActivity, notify: Bool)
     /// A session's current pending message queue (oracle-cj3 / juancode-r82) — sent
@@ -224,6 +233,8 @@ extension ServerMessage: Encodable {
         case editorId, terminalId, requestId, reason, message
         // Version/capability handshake (juancode-tgc).
         case protocolVersion, capabilities
+        // Input acknowledgement (juancode-1u3).
+        case seq
         // Tracked-PR registry (juancode-bt2).
         case tracked, trackedId, prNumber, notification
         // Per-session message queue (oracle-cj3 / juancode-r82).
@@ -249,6 +260,10 @@ extension ServerMessage: Encodable {
             try c.encode("output", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(data, forKey: .data)
+        case let .inputAck(sessionId, seq):
+            try c.encode("inputAck", forKey: .type)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(seq, forKey: .seq)
         case let .exit(sessionId, exitCode):
             try c.encode("exit", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)

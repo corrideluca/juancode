@@ -1,7 +1,9 @@
 import type { ClientMessage, ServerMessage } from "../protocol.ts";
 import { getToken, promptForToken } from "./auth.ts";
+import { InputAckBuffer } from "./inputAckBuffer.ts";
 
 type Listener = (msg: ServerMessage) => void;
+type InFlightListener = (count: number) => void;
 
 /**
  * Connection state for the shared socket.
@@ -26,8 +28,19 @@ class JuancodeSocket {
   private ws: WebSocket | null = null;
   private readonly listeners = new Set<Listener>();
   private readonly statusListeners = new Set<StatusListener>();
+  private readonly inFlightListeners = new Set<InFlightListener>();
   private readonly queue: string[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Sent-but-unacked `input` messages, so a mid-write connection drop no longer
+  // silently loses keystrokes (juancode-1u3). Resent on reconnect; cleared per
+  // matching `inputAck`.
+  private readonly inputBuffer = new InputAckBuffer();
+  // Whether the server advertised the `inputAck` capability. `null` until the
+  // `serverInfo` handshake arrives (the first frame on connect); we buffer
+  // optimistically until then. A server that doesn't ack makes tracking useless
+  // (acks would never clear the buffer), so we stop buffering once we know.
+  private ackSupported: boolean | null = null;
 
   private state: ConnectionState = "offline";
   // Consecutive failed reconnect attempts; drives the backoff delay.
@@ -134,13 +147,30 @@ class JuancodeSocket {
       this.failedCloses = 0;
       this.attempts = 0;
       this.setState("online");
+      // Drain messages queued while offline (attach/resize/etc.) first, then
+      // replay any still-unacked keystrokes (juancode-1u3) — these were already
+      // handed to a now-dead socket, so the offline queue never held them.
       while (this.queue.length) ws.send(this.queue.shift()!);
+      for (const data of this.inputBuffer.pending()) ws.send(data);
     };
     ws.onmessage = (ev) => {
       let msg: ServerMessage;
       try {
         msg = JSON.parse(ev.data as string) as ServerMessage;
       } catch {
+        return;
+      }
+      if (msg.type === "serverInfo") {
+        // Feature-detect input acknowledgement. If the peer doesn't ack, the
+        // buffer would never drain, so drop it and fall back to best-effort.
+        this.ackSupported = msg.capabilities.includes("inputAck");
+        if (!this.ackSupported && this.inputBuffer.size > 0) {
+          this.inputBuffer.clear();
+          this.notifyInFlight();
+        }
+      } else if (msg.type === "inputAck") {
+        // Clear the acknowledged keystroke; not forwarded to UI listeners.
+        if (this.inputBuffer.ack(msg.seq)) this.notifyInFlight();
         return;
       }
       for (const l of this.listeners) l(msg);
@@ -167,6 +197,19 @@ class JuancodeSocket {
   }
 
   send(msg: ClientMessage): void {
+    // Track keystrokes/pastes so a mid-write drop can't silently lose them: tag
+    // each with a monotonic `seq`, buffer it until the server acks, and rely on
+    // `onopen` to resend the buffer on reconnect (juancode-1u3). Skipped when we
+    // know the server can't ack — then it's a plain best-effort send.
+    if (msg.type === "input" && this.ackSupported !== false) {
+      const { data } = this.inputBuffer.track(msg);
+      this.notifyInFlight();
+      // Don't also push to the offline queue: the input buffer's own replay on
+      // `onopen` covers the offline case, so queueing here would double-send.
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(data);
+      else this.connect();
+      return;
+    }
     const data = JSON.stringify(msg);
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(data);
@@ -174,6 +217,23 @@ class JuancodeSocket {
       this.queue.push(data);
       this.connect();
     }
+  }
+
+  /** Count of sent-but-unacknowledged keystrokes (for a subtle "unsent" hint). */
+  get inFlightInputCount(): number {
+    return this.inputBuffer.size;
+  }
+
+  /** Subscribe to in-flight input count changes; fires immediately with the current count. */
+  subscribeInFlight(listener: InFlightListener): () => void {
+    this.inFlightListeners.add(listener);
+    listener(this.inputBuffer.size);
+    return () => this.inFlightListeners.delete(listener);
+  }
+
+  private notifyInFlight(): void {
+    const n = this.inputBuffer.size;
+    for (const l of this.inFlightListeners) l(n);
   }
 
   subscribe(listener: Listener): () => void {

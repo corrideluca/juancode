@@ -29,7 +29,11 @@ export type ServerCapability =
   | "trackedPrs"
   | "editor"
   | "terminal"
-  | "adoptExternal";
+  | "adoptExternal"
+  // The server replies with an `inputAck` for every `input` that carries a
+  // `seq` (juancode-1u3), so a client can buffer unacked keystrokes and resend
+  // them on reconnect instead of silently losing a mid-write connection drop.
+  | "inputAck";
 
 export type ProviderId = "claude" | "codex";
 
@@ -213,7 +217,15 @@ export type ClientMessage =
       cols: number;
       rows: number;
     }
-  | { type: "input"; sessionId: string; data: string }
+  /**
+   * A keystroke / paste for a session (or an ephemeral editor/terminal) pty.
+   * `seq` is an optional per-connection monotonic id (juancode-1u3): when
+   * present the server replies with a matching `inputAck` once it has written
+   * the data, letting the client buffer unacked input and resend it on
+   * reconnect. Omitted by older clients (and for fire-and-forget writes), in
+   * which case the server just writes without acking.
+   */
+  | { type: "input"; sessionId: string; data: string; seq?: number }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
   | { type: "kill"; sessionId: string }
   /**
@@ -319,6 +331,13 @@ export type ServerMessage =
   | { type: "created"; session: SessionMeta }
   | { type: "attached"; sessionId: string; scrollback: string; session: SessionMeta }
   | { type: "output"; sessionId: string; data: string }
+  /**
+   * Acknowledgement that the server received and wrote an `input` message that
+   * carried a `seq` (juancode-1u3). Echoes the `sessionId` + `seq` so the client
+   * can clear that keystroke from its unacked buffer. Only sent when the input
+   * carried a `seq`; advertised via the `inputAck` server capability.
+   */
+  | { type: "inputAck"; sessionId: string; seq: number }
   | { type: "exit"; sessionId: string; exitCode: number | null }
   /**
    * A session's inferred activity changed. Broadcast for every live session so
