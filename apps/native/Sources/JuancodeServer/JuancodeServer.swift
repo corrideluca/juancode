@@ -47,6 +47,11 @@ public enum JuancodeServer {
             let (stream, cont) = AsyncStream<ServerMessage>.makeStream()
             let conn = WebSocketConnection(state: state) { msg in cont.yield(msg) }
             conn.start()
+            // Announce version + capabilities first, before any pty output, so
+            // clients can feature-detect (juancode-tgc). Yielded onto the same
+            // stream the writer drains, so it's the first frame on the wire.
+            conn.send(.serverInfo(protocolVersion: WireProtocol.version,
+                                  capabilities: WireProtocol.capabilities))
             let writer = Task {
                 for await msg in stream {
                     try? await outbound.writeTextMessage(msg.jsonString())

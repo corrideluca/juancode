@@ -25,8 +25,43 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(rows, 40)
     }
 
-    func testUnknownTypeStillThrows() {
-        XCTAssertThrowsError(try decode(#"{"type":"bogus"}"#))
+    // ── Version/capability handshake + graceful degrade (juancode-tgc) ───────────
+
+    func testUnknownTypeDegradesToUnknown() throws {
+        // A well-formed frame with an unrecognised `type` decodes to `.unknown`
+        // rather than throwing, so the server can ignore it instead of replying
+        // with a spurious "Invalid JSON".
+        guard case let .unknown(type) = try decode(#"{"type":"bogus"}"#) else {
+            return XCTFail("expected .unknown")
+        }
+        XCTAssertEqual(type, "bogus")
+    }
+
+    func testTSOnlyMessageTypeDegradesToUnknown() throws {
+        // Types the Node server implements but the embedded native server doesn't
+        // (a real case: the web client sends these) must degrade, not error.
+        for t in ["subscribeStructured", "subscribeScreen", "steerMessage", "reattachTerminal"] {
+            guard case let .unknown(type) = try decode(#"{"type":"\#(t)","sessionId":"s-1"}"#) else {
+                return XCTFail("expected .unknown for \(t)")
+            }
+            XCTAssertEqual(type, t)
+        }
+    }
+
+    func testMalformedJsonStillThrows() {
+        // Genuinely malformed input (missing the `type` discriminator, or not an
+        // object) is still a decode failure — only *unknown types* are tolerated.
+        XCTAssertThrowsError(try decode(#"{"sessionId":"s-1"}"#))
+        XCTAssertThrowsError(try decode(#"[1,2,3]"#))
+    }
+
+    func testEncodesServerInfo() throws {
+        let msg = ServerMessage.serverInfo(protocolVersion: WireProtocol.version,
+                                           capabilities: WireProtocol.capabilities)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "serverInfo")
+        XCTAssertEqual(obj?["protocolVersion"] as? Int, WireProtocol.version)
+        XCTAssertEqual(obj?["capabilities"] as? [String], WireProtocol.capabilities)
     }
 
     // ── Per-session message queue (oracle-cj3 / juancode-r82) ────────────────────

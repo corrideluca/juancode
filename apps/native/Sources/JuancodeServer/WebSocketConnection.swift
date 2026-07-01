@@ -328,6 +328,13 @@ final class WebSocketConnection: @unchecked Sendable {
 
         case let .resolveTrackNotification(trackedId, notificationId):
             await state.prTracking.resolveNotification(trackedId: trackedId, notificationId: notificationId)
+
+        case .unknown:
+            // A well-formed message this server doesn't implement (e.g. a TS-only
+            // type like `subscribeStructured`/`steerMessage`, or a newer client
+            // feature). Ignore it — clients feature-detect via `serverInfo`
+            // capabilities, so this is just belt-and-braces (juancode-tgc).
+            break
         }
     }
 }

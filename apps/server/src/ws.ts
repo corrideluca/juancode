@@ -14,7 +14,8 @@ import { isProviderId } from "./providers.ts";
 import { recoverCliSessionId } from "./recoverSession.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
 import type { Session } from "./session.ts";
-import type { ClientMessage, ServerMessage } from "./protocol.ts";
+import type { ClientMessage, ServerCapability, ServerMessage } from "./protocol.ts";
+import { PROTOCOL_VERSION } from "./protocol.ts";
 
 export function setupWebSocket(server: Server): void {
   // `noServer` so we own the upgrade and can gate it on the auth token before
@@ -52,6 +53,22 @@ export function setupWebSocket(server: Server): void {
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
+
+    // Announce the wire-protocol version + the features this server implements,
+    // before anything else, so clients can feature-detect (juancode-tgc). The
+    // Node server implements the full surface; the native embedded server
+    // advertises a narrower set.
+    const CAPABILITIES: ServerCapability[] = [
+      "structured",
+      "screen",
+      "steer",
+      "queue",
+      "trackedPrs",
+      "editor",
+      "terminal",
+      "adoptExternal",
+    ];
+    send({ type: "serverInfo", protocolVersion: PROTOCOL_VERSION, capabilities: CAPABILITIES });
 
     // Real sessions and ephemeral editor / shell-terminal ptys are all addressed
     // by id over the same input/resize/kill/output/exit messages — resolve

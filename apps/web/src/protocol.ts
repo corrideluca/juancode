@@ -9,6 +9,28 @@
  * all three.
  */
 
+/**
+ * Wire-protocol version + capability handshake (juancode-tgc).
+ *
+ * On connect the server sends a `serverInfo` message announcing its
+ * `protocolVersion` and the optional `capabilities` it implements, so a client
+ * can feature-detect instead of assuming. Bump `PROTOCOL_VERSION` only on a
+ * breaking change; additive fields need no bump — both twins tolerate unknown
+ * fields (`JSON.parse`) and the Swift decoder drops unknown message types.
+ */
+export const PROTOCOL_VERSION = 1;
+
+/** An optional server feature a client can gate on (from `serverInfo.capabilities`). */
+export type ServerCapability =
+  | "structured"
+  | "screen"
+  | "steer"
+  | "queue"
+  | "trackedPrs"
+  | "editor"
+  | "terminal"
+  | "adoptExternal";
+
 export type ProviderId = "claude" | "codex";
 
 /**
@@ -287,6 +309,13 @@ export type ClientMessage =
   // ── END tracked-PR registry ──────────────────────────────────────────────────
 
 export type ServerMessage =
+  /**
+   * Sent once, immediately on connect, before any other message (juancode-tgc).
+   * Announces the server's wire-protocol version and the optional capabilities it
+   * implements so clients can feature-detect. Older clients that don't recognise
+   * this type simply ignore it.
+   */
+  | { type: "serverInfo"; protocolVersion: number; capabilities: ServerCapability[] }
   | { type: "created"; session: SessionMeta }
   | { type: "attached"; sessionId: string; scrollback: string; session: SessionMeta }
   | { type: "output"; sessionId: string; data: string }

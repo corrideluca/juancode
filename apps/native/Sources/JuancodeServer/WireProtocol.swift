@@ -48,6 +48,13 @@ public enum ClientMessage: Sendable {
     case untrackPr(trackedId: String)
     /// Dismiss a surfaced needs-decision notification.
     case resolveTrackNotification(trackedId: String, notificationId: String)
+    /// A well-formed message whose `type` this server doesn't implement — e.g. a
+    /// newer client feature, or a TS-only message the embedded server doesn't
+    /// support (`subscribeStructured`, `steerMessage`, …). Decoding degrades to
+    /// this instead of failing, so an unknown type is silently ignored rather than
+    /// killing the message with a spurious "Invalid JSON" (juancode-tgc). Clients
+    /// feature-detect via the `serverInfo` capabilities to avoid sending these.
+    case unknown(type: String)
 }
 
 extension ClientMessage: Decodable {
@@ -134,15 +141,31 @@ extension ClientMessage: Decodable {
             self = .resolveTrackNotification(trackedId: try c.decode(String.self, forKey: .trackedId),
                                              notificationId: try c.decode(String.self, forKey: .notificationId))
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type, in: c, debugDescription: "Unknown client message type: \(type)")
+            // Degrade gracefully: a well-formed frame with an unrecognised `type`
+            // is tolerated (a newer/other-server feature), not a decode error. Only
+            // genuinely malformed JSON still fails to decode (juancode-tgc).
+            self = .unknown(type: type)
         }
     }
 }
 
 // MARK: - Server → client
 
+/// Current wire-protocol version and the capabilities the embedded native server
+/// implements (juancode-tgc). Mirrors `PROTOCOL_VERSION` / `ServerCapability` in the
+/// two `protocol.ts` twins. The native server implements a narrower surface than the
+/// Node server — notably no `structured`/`screen`/`steer` — so clients feature-detect
+/// via `serverInfo` rather than assuming parity.
+public enum WireProtocol {
+    public static let version = 1
+    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal"]
+}
+
 public enum ServerMessage: Sendable {
+    /// Sent once, immediately on connect, before any other message: the server's
+    /// wire-protocol version + implemented capabilities, for client feature
+    /// detection (juancode-tgc).
+    case serverInfo(protocolVersion: Int, capabilities: [String])
     case created(session: SessionMeta)
     case attached(sessionId: String, scrollback: String, session: SessionMeta)
     case output(sessionId: String, data: String)
@@ -199,6 +222,8 @@ extension ServerMessage: Encodable {
     private enum K: String, CodingKey {
         case type, session, sessionId, scrollback, data, exitCode, state, notify
         case editorId, terminalId, requestId, reason, message
+        // Version/capability handshake (juancode-tgc).
+        case protocolVersion, capabilities
         // Tracked-PR registry (juancode-bt2).
         case tracked, trackedId, prNumber, notification
         // Per-session message queue (oracle-cj3 / juancode-r82).
@@ -208,6 +233,10 @@ extension ServerMessage: Encodable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: K.self)
         switch self {
+        case let .serverInfo(protocolVersion, capabilities):
+            try c.encode("serverInfo", forKey: .type)
+            try c.encode(protocolVersion, forKey: .protocolVersion)
+            try c.encode(capabilities, forKey: .capabilities)
         case let .created(session):
             try c.encode("created", forKey: .type)
             try c.encode(session, forKey: .session)
