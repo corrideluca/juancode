@@ -15,6 +15,11 @@ struct SessionSettingsView: View {
 
     private var enabled: Bool { model.autoCloseIdleMinutes > 0 }
 
+    /// Draft budget the field edits, kept separate so toggling off (model → 0)
+    /// doesn't lose the chosen amount (juancode-qoc).
+    @State private var budget = 20.0
+    private var budgetEnabled: Bool { model.costBudgetUsd > 0 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -44,6 +49,30 @@ struct SessionSettingsView: View {
                 }
                 .disabled(!enabled)
                 .foregroundStyle(enabled ? .primary : .secondary)
+
+                Divider().padding(.vertical, 4)
+
+                // Estimated-cost budget (juancode-qoc): colours the sidebar total
+                // amber past the warn threshold and red at/over budget.
+                Toggle("Warn on estimated cost budget", isOn: Binding(
+                    get: { budgetEnabled },
+                    set: { model.costBudgetUsd = $0 ? budget : 0 }))
+
+                HStack(spacing: 8) {
+                    Text("Budget")
+                    TextField("USD", value: $budget, format: .currency(code: "USD"))
+                        .frame(width: 90)
+                        .onChange(of: budget) { _, b in if budgetEnabled { model.costBudgetUsd = max(0, b) } }
+                    Text("· warn at")
+                    Stepper(value: Binding(
+                        get: { model.costBudgetWarnPercent },
+                        set: { model.costBudgetWarnPercent = $0 }), in: 10...100, step: 5) {
+                        Text("\(model.costBudgetWarnPercent)%").monospacedDigit()
+                    }
+                    .fixedSize()
+                }
+                .disabled(!budgetEnabled)
+                .foregroundStyle(budgetEnabled ? .primary : .secondary)
             }
             .padding(16)
 
@@ -60,6 +89,9 @@ struct SessionSettingsView: View {
                 .padding(.vertical, 8)
         }
         .frame(width: 520, height: 420)
-        .onAppear { if enabled { minutes = model.autoCloseIdleMinutes } }
+        .onAppear {
+            if enabled { minutes = model.autoCloseIdleMinutes }
+            if budgetEnabled { budget = model.costBudgetUsd }
+        }
     }
 }

@@ -318,6 +318,23 @@ struct SidebarView: View {
         model.sessions.filter { !$0.archived }.aggregateUsage()
     }
 
+    /// Colour for a budget level, or nil (secondary) when off/ok (juancode-qoc).
+    private func budgetTint(_ level: BudgetLevel) -> Color? {
+        switch level {
+        case .off, .ok: return nil
+        case .warn: return .orange
+        case .over: return .red
+        }
+    }
+
+    private func budgetHelp(_ b: BudgetStatus) -> String {
+        switch b.level {
+        case .off: return "Total token usage across visible sessions"
+        case .ok, .warn: return "Estimated spend: \(b.progressLabel ?? "") budget"
+        case .over: return "Over budget: \(b.progressLabel ?? "")"
+        }
+    }
+
     /// Sessions filtered by `query` (case-insensitive over title + cwd) and the
     /// archived toggle, then grouped by folder and sorted stably by cwd — mirrors
     /// the web sidebar.
@@ -489,16 +506,25 @@ struct SidebarView: View {
             }
             if let total = totalUsage, let label = total.badgeLabel {
                 Divider()
+                // Colour + budget progress when a cost budget is set (juancode-qoc):
+                // amber past the warn threshold, red at/over budget.
+                let budget = model.budgetStatus(forSpend: total.costUsd)
+                let tint = budgetTint(budget.level)
                 HStack(spacing: 4) {
                     Text("Total").font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
+                    if let progress = budget.progressLabel {
+                        Text(progress)
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(tint ?? .secondary)
+                    }
                     Text(label)
                         .font(.system(size: 11).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(tint ?? .secondary)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .help("Total token usage across visible sessions"
+                .help(budgetHelp(budget)
                     + (total.costUsd != nil ? " · estimated cost" : ""))
             }
             if archivedCount > 0 {
@@ -706,6 +732,12 @@ private struct FolderHeader: View {
         group.sessions.filter { !model.isExternal($0.id) }
     }
 
+    /// Per-project spend rollup (juancode-qoc): summed estimated cost across this
+    /// folder's sessions, as a short "$0.42" — nil when no session reports a cost.
+    private var folderCost: String? {
+        SessionUsageFormat.cost(group.sessions.aggregateUsage()?.costUsd)
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             // Chevron + name + running-count + the empty stretch up to the "+" menu all
@@ -737,6 +769,13 @@ private struct FolderHeader: View {
                                 .foregroundStyle(.red)
                         }
                         .help("\(unreadCount) session(s) here with unread activity")
+                    }
+                    // Per-project spend rollup (juancode-qoc).
+                    if let cost = folderCost {
+                        Text(cost)
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .help("Estimated cost across this project's sessions")
                     }
                     Spacer(minLength: 8)
                 }

@@ -19,6 +19,11 @@ private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
+/// UserDefaults keys for the estimated-cost budget (juancode-qoc): a USD ceiling
+/// (`0` = off) and the percent-of-budget at which the total turns amber.
+private let costBudgetUsdKey = "juancode.costBudgetUsd"
+private let costBudgetWarnPercentKey = "juancode.costBudgetWarnPercent"
+
 /// A resumable external CLI conversation offered in the new-session sheet's
 /// "Continue existing" picker (juancode-g4c): a cwd-scoped, header-only
 /// `listExternalSessions` hit enriched with a derived display title. Selecting one
@@ -371,6 +376,23 @@ final class AppModel {
     /// edited from Settings → Sessions (⌘,). See `autoCloseIdleSessions`.
     var autoCloseIdleMinutes: Int = UserDefaults.standard.object(forKey: autoCloseIdleMinutesKey) as? Int ?? 60 {
         didSet { UserDefaults.standard.set(autoCloseIdleMinutes, forKey: autoCloseIdleMinutesKey) }
+    }
+
+    /// Estimated-cost budget in USD (juancode-qoc). `0` = off. When set, the sidebar
+    /// total turns amber past the warn threshold and red at/over budget. Compared
+    /// against summed `SessionUsage.costUsd`. Persisted; edited from Settings → Sessions.
+    var costBudgetUsd: Double = UserDefaults.standard.object(forKey: costBudgetUsdKey) as? Double ?? 0 {
+        didSet { UserDefaults.standard.set(costBudgetUsd, forKey: costBudgetUsdKey) }
+    }
+    /// Percent-of-budget at which the total goes amber (default 80). Persisted.
+    var costBudgetWarnPercent: Int = UserDefaults.standard.object(forKey: costBudgetWarnPercentKey) as? Int ?? 80 {
+        didSet { UserDefaults.standard.set(costBudgetWarnPercent, forKey: costBudgetWarnPercentKey) }
+    }
+
+    /// Evaluate a spend figure against the current budget (juancode-qoc). `.off`
+    /// when no budget is set. Used by the sidebar total footer.
+    func budgetStatus(forSpend spentUsd: Double?) -> BudgetStatus {
+        evaluateBudget(spentUsd: spentUsd, budgetUsd: costBudgetUsd, warnPercent: costBudgetWarnPercent)
     }
 
     /// User's custom sidebar project order (folder cwds). Folders not listed here
