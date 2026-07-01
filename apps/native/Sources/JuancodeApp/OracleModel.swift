@@ -243,6 +243,20 @@ final class OracleModel {
         }
     }
 
+    /// Permanently delete an Oracle session (rail right-click → Delete): kill its pty,
+    /// drop its persisted row + scrollback, and remove any auto-created worktree — the
+    /// same full teardown the per-project sidebar's Delete does (`app.delete`). Unlike
+    /// `restartAgent` (kill ≠ delete, keeps it in the rail to resume), this discards the
+    /// conversation for good. If the deleted Oracle was the active chat, repoint to the
+    /// next-most-recent Oracle *before* tearing it down so the chat never renders a dead
+    /// session; with none left, the chat falls back to its "Start Oracle" affordance.
+    func deleteOracle(_ id: String) {
+        if oracleSessionId == id {
+            oracleSessionId = oracleSessions.first { $0.id != id }?.id
+        }
+        app.delete(id)
+    }
+
     /// Make sure the chat is pointed at a live Oracle: keep the active one if it's
     /// still running, else adopt the most recent live Oracle, else continue the most
     /// recent *past* Oracle (resumed via its pinned CLI session id), and only spawn a

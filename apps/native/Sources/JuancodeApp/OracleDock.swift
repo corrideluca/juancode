@@ -535,6 +535,9 @@ private struct OracleSessionRail: View {
         .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture { oracle.selectOracle(meta.id) }
+        .contextMenu {
+            Button("Delete", role: .destructive) { oracle.deleteOracle(meta.id) }
+        }
         .help(meta.title)
         .clickCursor()
     }
