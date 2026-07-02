@@ -64,6 +64,13 @@ struct RootView: View {
                       ? "Recurring tasks — scheduled re-runs of a prompt"
                       : "\(model.recurringTasks.count) recurring task(s) scheduled")
                 .clickCursor()
+                Button { model.showingGithubBoards = true } label: {
+                    Label("GitHub Boards", systemImage: "rectangle.grid.2x2")
+                }
+                .help(model.githubBoards.isEmpty
+                      ? "GitHub boards — add project board links and priorities"
+                      : "\(model.githubBoards.count) GitHub board link(s)")
+                .clickCursor()
                 Button { oracle.open(tab: .issues) } label: {
                     Label("Issues", systemImage: "tray.full")
                 }
@@ -73,24 +80,6 @@ struct RootView: View {
                     Label("Oracle", systemImage: "sparkles")
                 }
                 .help("Oracle — global orchestration (⌃Space)")
-                .clickCursor()
-                // Appearance toggle (juancode light/dark): click cycles
-                // System → Light → Dark; the dropdown picks one directly.
-                Menu {
-                    Picker("Appearance", selection: $model.themePreference) {
-                        ForEach(ThemePreference.allCases) { pref in
-                            Label(pref.label, systemImage: pref.symbol).tag(pref)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                } label: {
-                    Label("Appearance", systemImage: model.themePreference.symbol)
-                } primaryAction: {
-                    model.themePreference = model.themePreference.next
-                }
-                .menuIndicator(.hidden)
-                .help("Appearance: \(model.themePreference.label) — click to cycle, or pick")
                 .clickCursor()
             }
         }
@@ -117,6 +106,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showingRecurringTasks) {
             RecurringTasksSheet()
+        }
+        .sheet(isPresented: $model.showingGithubBoards) {
+            GithubBoardsSheet()
         }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()
@@ -403,7 +395,10 @@ struct SidebarView: View {
         // discovered elsewhere on disk are noise. Worktrees of in-workspace repos sit
         // in sibling `<repo>-worktrees/…` dirs, still under the root, so they survive.
         let inWorkspace = nonOracle.filter { Config.isUnderWorkspaceRoot($0.cwd) }
-        let visible = showArchived ? inWorkspace : inWorkspace.filter { !$0.archived }
+        let visibleProjects = inWorkspace.filter {
+            !model.hiddenSidebarProjects.contains(model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd))
+        }
+        let visible = showArchived ? visibleProjects : visibleProjects.filter { !$0.archived }
         let filtered = q.isEmpty
             ? visible
             : visible.filter {
@@ -543,6 +538,16 @@ struct SidebarView: View {
                             .foregroundStyle(.primary)
                     }
                     .buttonStyle(.borderless)
+                    .clickCursor()
+                }
+                if !model.hiddenSidebarProjects.isEmpty {
+                    Button { model.restoreHiddenSidebarProjects() } label: {
+                        Label("Restore removed projects", systemImage: "arrow.uturn.backward.circle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Show \(model.hiddenSidebarProjects.count) removed sidebar project(s) again")
                     .clickCursor()
                 }
             }
@@ -807,6 +812,7 @@ private struct FolderHeader: View {
     let toggle: () -> Void
     @State private var showingAgentPicker = false
     @State private var confirmingCloseAll = false
+    @State private var confirmingRemoveProject = false
     @State private var plusHovering = false
 
     /// Folder tooltip: full path, plus the per-project spend rollup when known so
@@ -1030,6 +1036,10 @@ private struct FolderHeader: View {
             if !closableSessions.isEmpty {
                 Button("Close All \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",
                        role: .destructive) { confirmingCloseAll = true }
+                Divider()
+            }
+            Button("Remove Project from Sidebar", role: .destructive) {
+                confirmingRemoveProject = true
             }
         }
         .confirmationDialog("Close all sessions in \(group.name)?",
@@ -1044,6 +1054,15 @@ private struct FolderHeader: View {
             Text(running > 0
                  ? "\(running) of these are still running. This stops every agent here and removes the sessions."
                  : "This removes every session in this project.")
+        }
+        .confirmationDialog("Remove \(group.name) from the sidebar?",
+                            isPresented: $confirmingRemoveProject, titleVisibility: .visible) {
+            Button("Remove from Sidebar", role: .destructive) {
+                model.hideSidebarProject(group.cwd)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This only hides the project group in CorriCode. It does not delete sessions, worktrees, or files.")
         }
         .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }

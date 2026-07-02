@@ -23,6 +23,9 @@ private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
+/// UserDefaults key for projects hidden from the native sidebar.
+private let hiddenSidebarProjectsKey = "juancode.hiddenSidebarProjects"
+
 /// UserDefaults keys for the estimated-cost budget (juancode-qoc): a USD ceiling
 /// (`0` = off) and the percent-of-budget at which the total turns amber.
 private let costBudgetUsdKey = "juancode.costBudgetUsd"
@@ -38,6 +41,49 @@ struct ResumableSession: Identifiable, Sendable {
     let startMs: Int
     let title: String
     var id: String { cliSessionId }
+}
+
+enum GithubBoardPriority: String, Codable, CaseIterable, Identifiable, Sendable {
+    case high
+    case medium
+    case low
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .high: "High"
+        case .medium: "Medium"
+        case .low: "Low"
+        }
+    }
+
+    var rank: Int {
+        switch self {
+        case .high: 0
+        case .medium: 1
+        case .low: 2
+        }
+    }
+}
+
+struct GithubBoardLink: Identifiable, Codable, Sendable, Equatable {
+    var id: String
+    var title: String
+    var url: String
+    var priority: GithubBoardPriority
+    var createdAt: Int
+    var updatedAt: Int
+
+    init(id: String = UUID().uuidString, title: String, url: String,
+         priority: GithubBoardPriority, createdAt: Int, updatedAt: Int) {
+        self.id = id
+        self.title = title
+        self.url = url
+        self.priority = priority
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
 }
 
 /// Observable view-model bridging the SwiftUI shell to the shared `AppState`. The
@@ -100,6 +146,8 @@ final class AppModel {
     var showingSessionHealth = false
     /// Recurring-tasks create/manage panel (juancode-46g).
     var showingRecurringTasks = false
+    /// Link-based GitHub Projects / board priority panel.
+    var showingGithubBoards = false
     /// ⌘K prompt-template palette (juancode-2vd): quick-insert saved prompts.
     var showingPromptPalette = false
     /// Saved prompt templates, loaded from `UserDefaults` on launch. Mutated through
@@ -110,6 +158,8 @@ final class AppModel {
     /// through `addSessionTemplate`/`updateSessionTemplate`/`deleteSessionTemplate`,
     /// which persist on every change. The launcher sheet binds to this array.
     var sessionTemplates: [SessionTemplate] = []
+    /// Saved GitHub board links, ordered by priority in the panel.
+    var githubBoards: [GithubBoardLink] = []
     /// Controls the session-template launcher/manager sheet.
     var showingSessionTemplates = false
     var errorMessage: String?
@@ -138,6 +188,7 @@ final class AppModel {
         restoreRecurringTasks()
         restorePromptTemplates()
         restoreSessionTemplates()
+        restoreGithubBoards()
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
         startWorkAtRiskLoop() // periodic dirty/unpushed scan (juancode-rxu)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
@@ -423,6 +474,21 @@ final class AppModel {
     /// drag-and-drop on the folder headers.
     var projectOrder: [String] = (UserDefaults.standard.array(forKey: projectOrderKey) as? [String]) ?? [] {
         didSet { UserDefaults.standard.set(projectOrder, forKey: projectOrderKey) }
+    }
+
+    /// Sidebar projects the user removed from view. This hides the project group
+    /// only; sessions and folders are left untouched on disk.
+    var hiddenSidebarProjects: Set<String> = Set(UserDefaults.standard.array(forKey: hiddenSidebarProjectsKey) as? [String] ?? []) {
+        didSet { UserDefaults.standard.set(Array(hiddenSidebarProjects).sorted(), forKey: hiddenSidebarProjectsKey) }
+    }
+
+    func hideSidebarProject(_ cwd: String) {
+        hiddenSidebarProjects.insert(cwd)
+        projectOrder.removeAll { $0 == cwd }
+    }
+
+    func restoreHiddenSidebarProjects() {
+        hiddenSidebarProjects.removeAll()
     }
 
     /// At a turn boundary — background work finishing or now needing your reply —
@@ -1572,6 +1638,57 @@ final class AppModel {
     func deleteSessionTemplate(_ id: String) {
         sessionTemplates.removeAll { $0.id == id }
         persistSessionTemplates()
+    }
+
+    // MARK: - GitHub boards
+
+    private static let githubBoardsDefaultsKey = "juancode.githubBoards.v1"
+
+    var githubBoardsByPriority: [GithubBoardLink] {
+        githubBoards.sorted {
+            if $0.priority.rank != $1.priority.rank { return $0.priority.rank < $1.priority.rank }
+            return $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    private func persistGithubBoards() {
+        if let data = try? JSONEncoder().encode(githubBoards) {
+            UserDefaults.standard.set(data, forKey: Self.githubBoardsDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.githubBoardsDefaultsKey)
+        }
+    }
+
+    private func restoreGithubBoards() {
+        guard let data = UserDefaults.standard.data(forKey: Self.githubBoardsDefaultsKey),
+              let list = try? JSONDecoder().decode([GithubBoardLink].self, from: data) else { return }
+        githubBoards = list
+    }
+
+    @discardableResult
+    func addGithubBoard(title: String, url: String, priority: GithubBoardPriority) -> GithubBoardLink {
+        let now = nowMs()
+        let board = GithubBoardLink(
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+            url: url.trimmingCharacters(in: .whitespacesAndNewlines),
+            priority: priority,
+            createdAt: now,
+            updatedAt: now)
+        githubBoards.append(board)
+        persistGithubBoards()
+        return board
+    }
+
+    func updateGithubBoardPriority(_ id: String, priority: GithubBoardPriority) {
+        guard let i = githubBoards.firstIndex(where: { $0.id == id }) else { return }
+        githubBoards[i].priority = priority
+        githubBoards[i].updatedAt = nowMs()
+        persistGithubBoards()
+    }
+
+    func deleteGithubBoard(_ id: String) {
+        githubBoards.removeAll { $0.id == id }
+        persistGithubBoards()
     }
 
     /// Spawn `count` sessions from a template. Each is a normal `create` — same

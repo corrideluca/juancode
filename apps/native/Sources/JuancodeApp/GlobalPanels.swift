@@ -362,6 +362,167 @@ private struct TrackedPrRow: View {
     }
 }
 
+// MARK: - GitHub boards
+
+struct GithubBoardsSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var url = ""
+    @State private var priority: GithubBoardPriority = .high
+
+    private var trimmedTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedUrl: String { url.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var validGithubUrl: URL? {
+        guard let u = URL(string: trimmedUrl),
+              let scheme = u.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = u.host?.lowercased(), host == "github.com" || host.hasSuffix(".github.com") else {
+            return nil
+        }
+        return u
+    }
+    private var canAdd: Bool { !trimmedTitle.isEmpty && validGithubUrl != nil }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("GitHub Boards").font(.title3).bold()
+                Spacer()
+                Button("Done") { dismiss() }.clickCursor()
+            }
+            .padding()
+            Divider()
+            addBoardForm
+            Divider()
+            if model.githubBoards.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "rectangle.grid.2x2").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("No GitHub board links yet.")
+                        .foregroundStyle(.secondary).font(.system(size: 13))
+                    Text("Add GitHub Projects or board URLs above, then tag each one by priority.")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.githubBoardsByPriority) { board in
+                            GithubBoardRow(board: board)
+                            Divider()
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 660, height: 500)
+    }
+
+    private var addBoardForm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Board name", text: $title)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .frame(width: 190)
+                    .onSubmit(addBoard)
+                TextField("GitHub board URL", text: $url)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .onSubmit(addBoard)
+                Picker("Priority", selection: $priority) {
+                    ForEach(GithubBoardPriority.allCases) { p in
+                        Text(p.label).tag(p)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+                Button("Add", action: addBoard)
+                    .disabled(!canAdd)
+                    .clickCursor()
+            }
+            if !trimmedUrl.isEmpty && validGithubUrl == nil {
+                Text("Use a valid github.com URL.")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    private func addBoard() {
+        guard canAdd else { return }
+        model.addGithubBoard(title: trimmedTitle, url: trimmedUrl, priority: priority)
+        title = ""
+        url = ""
+        priority = .high
+    }
+}
+
+private struct GithubBoardRow: View {
+    @Environment(AppModel.self) private var model
+    let board: GithubBoardLink
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "rectangle.grid.2x2")
+                .font(.system(size: 13))
+                .foregroundStyle(priorityColor(board.priority))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(board.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    Text(board.priority.label)
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(priorityColor(board.priority).opacity(0.18))
+                        .foregroundStyle(priorityColor(board.priority))
+                        .clipShape(Capsule())
+                    Spacer(minLength: 8)
+                }
+                Text(board.url)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Picker("Priority", selection: Binding(
+                get: { board.priority },
+                set: { model.updateGithubBoardPriority(board.id, priority: $0) }
+            )) {
+                ForEach(GithubBoardPriority.allCases) { p in
+                    Text(p.label).tag(p)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 120)
+            Button("Open") {
+                if let u = URL(string: board.url) { NSWorkspace.shared.open(u) }
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11))
+            .clickCursor()
+            Button("Delete", role: .destructive) {
+                model.deleteGithubBoard(board.id)
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11))
+            .clickCursor()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+}
+
+private func priorityColor(_ priority: GithubBoardPriority) -> Color {
+    switch priority {
+    case .high: .red
+    case .medium: .orange
+    case .low: .secondary
+    }
+}
+
 // MARK: - Tracked Linear issues (juancode-7sa)
 
 /// The global view of every Linear issue under watch — the twin of `TrackedPrsSheet`.
