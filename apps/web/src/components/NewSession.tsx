@@ -5,6 +5,7 @@ import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
 import type { ProviderId } from "../protocol.ts";
 import { StatusPanel } from "./StatusPanel.tsx";
+import { APP_TAGLINE } from "../lib/branding.ts";
 
 export function NewSession() {
   const navigate = useNavigate();
@@ -65,7 +66,8 @@ export function NewSession() {
       <div>
         <h1 className="text-xl font-semibold">New session</h1>
         <p className="text-sm text-neutral-400">
-          Launches the real CLI in a terminal — your MCP servers, auth and slash commands all work.
+          {APP_TAGLINE} Launches the real CLI in a terminal with your MCP servers, auth, and slash
+          commands intact.
         </p>
       </div>
 
@@ -76,7 +78,7 @@ export function NewSession() {
             onClick={() => setProvider(p.id)}
             className={`rounded-md border px-4 py-2 text-sm transition-colors ${
               provider === p.id
-                ? "border-sky-500 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20"
+                ? "border-emerald-500 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
                 : "border-neutral-700 text-neutral-300 hover:border-neutral-500 hover:bg-neutral-800/40"
             }`}
           >
@@ -152,10 +154,10 @@ export function NewSession() {
           type="checkbox"
           checked={isolateWorktree}
           onChange={(e) => setIsolateWorktree(e.target.checked)}
-          className="mt-0.5 accent-sky-500"
+          className="mt-0.5 accent-emerald-500"
         />
         <span className="text-sm">
-          <span className="font-medium text-sky-300">Isolate in a new git worktree</span>
+          <span className="font-medium text-emerald-300">Isolate in a new git worktree</span>
           <span className="block text-xs text-neutral-500">
             Runs in a fresh worktree on a new <code className="text-neutral-400">juancode/…</code>{" "}
             branch, so this session can't clobber other sessions' working tree. Removed when the
@@ -168,7 +170,7 @@ export function NewSession() {
         <button
           onClick={start}
           disabled={!cwd || starting}
-          className="self-start rounded-md bg-sky-600 px-5 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+          className="self-start rounded-md bg-emerald-600 px-5 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
         >
           {starting ? "Starting…" : `Start ${provider}`}
         </button>

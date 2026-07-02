@@ -4,6 +4,7 @@ import { Sidebar } from "./Sidebar.tsx";
 import { ConnectionBanner } from "./ConnectionBanner.tsx";
 import { onTrackNotification } from "../lib/trackedPrs.ts";
 import { notifications } from "../lib/notifications.ts";
+import { APP_NAME } from "../lib/branding.ts";
 
 /**
  * Responsive app shell. On desktop the sidebar is a static column (unchanged
@@ -90,7 +91,7 @@ export function AppShell() {
           >
             ☰
           </button>
-          <span className="text-sm font-semibold tracking-tight">juancode</span>
+          <span className="text-sm font-semibold tracking-tight">{APP_NAME}</span>
         </header>
         <div className="min-h-0 flex-1">
           <Outlet />

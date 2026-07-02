@@ -10,7 +10,10 @@ import {
 import { AppShell } from "./components/AppShell.tsx";
 import { NewSession } from "./components/NewSession.tsx";
 import { SessionView } from "./components/SessionView.tsx";
+import { APP_NAME } from "./lib/branding.ts";
 import "./styles.css";
+
+document.title = APP_NAME;
 
 // A 4xx (bad request, missing, 401 → handled by promptForToken) won't fix
 // itself by retrying; anything else (network "Failed to fetch", 5xx, timeouts)
