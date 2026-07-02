@@ -42,6 +42,7 @@ public final class PtyProcess: @unchecked Sendable {
         cwd: String,
         cols: Int,
         rows: Int,
+        envOverrides: [String: String] = [:],
         queue: DispatchQueue = DispatchQueue(label: "juancode.pty"),
         onData: @escaping @Sendable ([UInt8]) -> Void,
         onExit: @escaping @Sendable (Int32) -> Void
@@ -61,6 +62,10 @@ public final class PtyProcess: @unchecked Sendable {
         argv[argvStrings.count] = nil
         let cExecutable = strdup(executable)
         let cCwd: UnsafeMutablePointer<CChar>? = cwd.isEmpty ? nil : strdup(cwd)
+        let envStrings = Self.environmentStrings(overrides: envOverrides)
+        let envp = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: envStrings.count + 1)
+        for (i, s) in envStrings.enumerated() { envp[i] = strdup(s) }
+        envp[envStrings.count] = nil
 
         var master: Int32 = 0
         var winp = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
@@ -74,7 +79,11 @@ public final class PtyProcess: @unchecked Sendable {
         if childPid == 0 {
             // ---- child ---- (async-signal-safe calls only)
             if let cCwd { _ = chdir(cCwd) }
-            execvp(cExecutable, argv)
+            if envOverrides.isEmpty {
+                execvp(cExecutable, argv)
+            } else {
+                execve(cExecutable, argv, envp)
+            }
             _exit(127)
         }
 
@@ -82,6 +91,8 @@ public final class PtyProcess: @unchecked Sendable {
         // The child got copies of these via fork; free our originals.
         for i in 0..<argvStrings.count { free(argv[i]) }
         argv.deallocate()
+        for i in 0..<envStrings.count { free(envp[i]) }
+        envp.deallocate()
         free(cExecutable)
         if let cCwd { free(cCwd) }
 
@@ -90,6 +101,13 @@ public final class PtyProcess: @unchecked Sendable {
         Self.disableSuspendChar(master)
         startReading()
         startExitWatch()
+    }
+
+    private static func environmentStrings(overrides: [String: String]) -> [String] {
+        guard !overrides.isEmpty else { return [] }
+        var env = ProcessInfo.processInfo.environment
+        for (key, value) in overrides { env[key] = value }
+        return env.map { "\($0.key)=\($0.value)" }
     }
 
     /// Disable the terminal's SUSP control char (Ctrl-Z) on the pty's line

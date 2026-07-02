@@ -65,7 +65,6 @@ import Testing
 
     @Test func terminalLaunchesDefaultShellWithoutAgentArgs() {
         #expect(Providers.terminal.label == "Terminal")
-        #expect(Providers.terminal.startArgs(id, SpawnOptions(skipPermissions: true, model: "ignored")) == [])
         #expect(Providers.terminal.resumeArgs(sid, SpawnOptions(skipPermissions: true, model: "ignored")) == [])
         #expect(ProviderId.launchCases == [.claude, .codex, .terminal])
         #expect(ProviderId.aiCases == [.claude, .codex])

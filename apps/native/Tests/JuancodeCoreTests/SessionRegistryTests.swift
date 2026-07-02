@@ -58,6 +58,32 @@ import Testing
         #expect(b.text.contains("READY"))
     }
 
+    @Test func terminalProviderShowsGitBranchInPrompt() async throws {
+        let repo = FileManager.default.temporaryDirectory
+            .appendingPathComponent("corricode-terminal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        let git = Process()
+        git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        git.arguments = ["init", "-q", "-b", "prompt-test"]
+        git.currentDirectoryURL = repo
+        try git.run()
+        git.waitUntilExit()
+
+        let reg = SessionRegistry(env: SessionEnvironment(
+            resolver: DefaultBinaryResolver(),
+            store: InMemorySessionStore(),
+            scrollbackLimit: 256 * 1024,
+            discoverCodexId: { _, _ in nil }
+        ))
+        let s = try reg.create(provider: .terminal, cwd: repo.path, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        let sink = ByteSink()
+        s.subscribeOutput(replay: true) { sink.add($0) }
+        await poll(5.0) { sink.text.contains("prompt-test") }
+        #expect(sink.text.contains("prompt-test"))
+    }
+
     @Test func lateSubscriberGetsScrollbackReplay() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
         let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)

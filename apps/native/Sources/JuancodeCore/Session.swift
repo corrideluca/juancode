@@ -223,12 +223,14 @@ public final class Session: @unchecked Sendable {
         }
 
         let command = env.resolver.command(for: meta.provider)
+        let envOverrides = meta.provider == .terminal ? TerminalProfile.environment() : [:]
         guard let proc = PtyProcess(
             executable: command,
             args: args,
             cwd: meta.cwd,
             cols: cols,
             rows: rows,
+            envOverrides: envOverrides,
             queue: workQueue,
             onData: { [weak self] bytes in self?.handleData(bytes) },
             onExit: { [weak self] code in self?.handleExit(code) }
