@@ -84,6 +84,35 @@ final class ClassifyPrActivityTests: XCTestCase {
         XCTAssertTrue(reason.contains("@octocat"))
     }
 
+    func testIgnoresSelfAuthoredCommentsAndReviews() {
+        // The tracking agent posts as `viewerLogin`; its own comments/reviews must not
+        // be treated as new activity (that echo-fires the poller), but must still land
+        // in the baseline so they never re-surface. Match is case-insensitive.
+        let prev = PrTrackSnapshot(checks: .passing, baselined: true)
+        let r = classifyPrActivity(prev: prev, activity: activity(
+            checks: .passing,
+            comments: [PrComment(id: "c1", author: "JuanOne", body: "posted my review"),
+                       PrComment(id: "c2", author: "reviewer", body: "actual feedback")],
+            reviews: [PrReview(id: "r1", author: "juanone", body: "self review", state: "COMMENTED")]),
+            viewerLogin: "juanone")
+        // Only the outside reviewer's comment fires.
+        XCTAssertEqual(r.events.count, 1)
+        guard case .autoFix(let reason) = r.events[0] else { return XCTFail("expected autoFix") }
+        XCTAssertTrue(reason.contains("1 new comment"))
+        XCTAssertTrue(reason.contains("@reviewer"))
+        XCTAssertFalse(reason.contains("@JuanOne"))
+        // Self-authored items are still baselined.
+        XCTAssertEqual(r.snapshot.seenCommentIds, ["c1", "c2"])
+        XCTAssertEqual(r.snapshot.seenReviewIds, ["r1"])
+    }
+
+    func testNoViewerLoginFiltersNothing() {
+        let prev = PrTrackSnapshot(checks: .passing, baselined: true)
+        let r = classifyPrActivity(prev: prev, activity: activity(
+            comments: [PrComment(id: "c1", author: "juanone", body: "hi")]))
+        XCTAssertEqual(r.events.count, 1)  // no viewer login ⇒ no self-filter
+    }
+
     func testChangesRequestedReviewIsNeedsDecision() {
         let prev = PrTrackSnapshot(checks: .passing, baselined: true)
         let r = classifyPrActivity(prev: prev, activity: activity(

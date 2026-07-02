@@ -59,8 +59,18 @@ export interface PrClassification {
  *
  * On the first poll (`!prev.baselined`) we only record the baseline and emit no
  * events, so tracking an already-busy PR doesn't replay its whole history.
+ *
+ * `viewerLogin` is the authenticated `gh` account the tracking agent posts as. Its
+ * own comments/reviews (the agent's code review, `@mergifyio queue`, replies) are
+ * NOT new activity — reacting to them re-fires the poller and drives the agent to
+ * comment again, an echo loop. So self-authored items are recorded into the baseline
+ * (so they never re-surface) but never generate events. Empty ⇒ no filter.
  */
-export function classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity): PrClassification {
+export function classifyPrActivity(
+  prev: PrTrackSnapshot,
+  activity: PrActivity,
+  viewerLogin = "",
+): PrClassification {
   const next: PrTrackSnapshot = {
     seenCommentIds: new Set(activity.comments.map((c) => c.id)),
     seenReviewIds: new Set(activity.reviews.map((r) => r.id)),
@@ -79,9 +89,13 @@ export function classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity):
 
   if (!prev.baselined) return { snapshot: next, events: [] };
 
+  // Case-insensitive "authored by the tracking agent itself".
+  const viewer = viewerLogin.toLowerCase();
+  const isSelf = (author: string) => viewer !== "" && author.toLowerCase() === viewer;
+
   const events: TrackEvent[] = [];
 
-  const newComments = activity.comments.filter((c) => !prev.seenCommentIds.has(c.id));
+  const newComments = activity.comments.filter((c) => !prev.seenCommentIds.has(c.id) && !isSelf(c.author));
   if (newComments.length > 0) {
     const who = orderedUniqueAuthors(newComments.map((c) => c.author));
     const n = newComments.length;
@@ -92,7 +106,7 @@ export function classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity):
   }
 
   for (const r of activity.reviews) {
-    if (prev.seenReviewIds.has(r.id)) continue;
+    if (prev.seenReviewIds.has(r.id) || isSelf(r.author)) continue;
     const who = r.author ? `@${r.author}` : "a reviewer";
     if (r.state === "CHANGES_REQUESTED") {
       events.push({ kind: "needsDecision", reason: `${who} requested changes` });

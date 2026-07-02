@@ -33,6 +33,7 @@ function makeDeps(over: Partial<TrackedPrDeps> = {}) {
   const getPrActivity = vi.fn(async () => activity());
   const deps: TrackedPrDeps = {
     getPrActivity,
+    getViewerLogin: vi.fn(async () => ""),
     spawnSession: vi.fn((_cwd: string) => {
       const id = `sess-${nextSessionId++}`;
       live.add(id);

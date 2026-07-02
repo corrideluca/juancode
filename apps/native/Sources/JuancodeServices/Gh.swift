@@ -102,7 +102,7 @@ private final class ViewerLoginBox: @unchecked Sendable {
     func set(_ v: String) { lock.lock(); value = v; lock.unlock() }
 }
 
-func getViewerLogin(_ cwd: String) async -> String {
+public func getViewerLogin(_ cwd: String) async -> String {
     if let cached = viewerLoginBox.get() { return cached }
     do {
         // `capture` returns the result for any exit code and only throws on

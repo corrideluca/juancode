@@ -80,6 +80,9 @@ final class AppModel {
     var terminalFocusToken = 0
     /// Bumped to request the sidebar list grab focus (⌃H). Drives a `@FocusState`.
     var sidebarFocusToken = 0
+    /// Bumped to request the sidebar's "Filter sessions…" field grab focus (⌃F).
+    /// Drives a `@FocusState` in `SidebarView`.
+    var sessionSearchFocusToken = 0
     /// Bumped to request the live terminal re-measure its bounds and force a genuine
     /// SIGWINCH — the manual "recalculate geometry" escape hatch for when a resize
     /// left the pane mis-sized (black margins / clipped render) and the automatic
@@ -275,6 +278,13 @@ final class AppModel {
         suppressTerminalAutoFocus = true
         if selection == nil { selectFirst() }
         sidebarFocusToken &+= 1
+    }
+
+    /// Move keyboard focus to the sidebar's session filter field (⌃F), so you can
+    /// start typing a find query without reaching for the mouse.
+    func focusSessionSearch() {
+        suppressTerminalAutoFocus = true
+        sessionSearchFocusToken &+= 1
     }
 
     /// Move keyboard focus into the live terminal (Enter / l / ⌃L).
@@ -1086,13 +1096,19 @@ final class AppModel {
     func pollTrackedOnce() async {
         for (key, pr) in tracked {
             let cwd = pr.cwd, number = pr.number
-            guard let activity = await Task.detached(priority: .utility, operation: {
-                await getPrActivity(cwd, number: number)
-            }).value else { continue }
+            let polled = await Task.detached(priority: .utility, operation: {
+                // Fetch the PR's activity and the authenticated `gh` login together so
+                // the classifier can ignore the agent's own comments (no echo loop).
+                async let activity = getPrActivity(cwd, number: number)
+                async let viewer = getViewerLogin(cwd)
+                return (await activity, await viewer)
+            }).value
+            guard let activity = polled.0 else { continue }
+            let viewerLogin = polled.1
 
             // The entry may have been untracked while we were off-actor.
             guard var entry = tracked[key] else { continue }
-            let result = classifyPrActivity(prev: entry.snapshot, activity: activity)
+            let result = classifyPrActivity(prev: entry.snapshot, activity: activity, viewerLogin: viewerLogin)
             entry.snapshot = result.snapshot
             entry.lastPolledAt = nowMs()
 

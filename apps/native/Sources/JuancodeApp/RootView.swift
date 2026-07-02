@@ -361,6 +361,8 @@ struct SidebarView: View {
     @State private var showingStatus = false
     /// Whether the session list holds keyboard focus, for vim-style nav (juancode-vgm).
     @FocusState private var listFocused: Bool
+    /// Whether the "Filter sessions…" field holds focus, so ⌃F can jump to it.
+    @FocusState private var searchFocused: Bool
 
     /// How many archived sessions exist (for the toggle label / visibility).
     private var archivedCount: Int { model.sessions.filter(\.archived).count }
@@ -484,8 +486,11 @@ struct SidebarView: View {
             TextField("Filter sessions…", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12))
+                .focused($searchFocused)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
+                // ⌃F (via `focusSessionSearch`) jumps focus straight to the filter.
+                .onChange(of: model.sessionSearchFocusToken) { _, _ in searchFocused = true }
             ScrollViewReader { proxy in
             List(selection: $model.selection) {
                 ForEach(groups) { group in
@@ -684,7 +689,13 @@ struct SidebarView: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(sessions, id: \.id) { meta in scrollRow(meta) }
+                    ForEach(Array(sessions.enumerated()), id: \.element.id) { index, meta in
+                        // Match the List path's minimal inter-row hairline.
+                        if index > 0 {
+                            Divider().overlay(Color.appHairline(0.12)).padding(.horizontal, 8)
+                        }
+                        scrollRow(meta)
+                    }
                 }
             }
             .frame(maxHeight: CGFloat(folderScrollMaxHeight))
@@ -709,6 +720,9 @@ struct SidebarView: View {
         let row = sessionRow(meta)
             .tag(meta.id)
             .selectionDisabled(external)
+            // A minimal hairline between session rows for visual separation.
+            .listRowSeparator(.visible)
+            .listRowSeparatorTint(Color.appHairline(0.12))
             .contextMenu { rowContextMenu(meta) }
         // Pointing-hand on hover for the clickable (selectable) rows; external
         // rows aren't selectable, so they keep the default cursor.
@@ -983,15 +997,16 @@ private struct FolderHeader: View {
                 .padding(.leading, 15) // align under the name, past the chevron
             }
         }
-        // Give each project a distinct, rounded bar: a subtle raised fill for contrast
-        // against the session rows. Slight horizontal inset so the rounded corners read.
+        // Full-width project bar: a subtle raised fill that spans the whole sidebar
+        // (edge to edge, no rounded inset) for clear contrast against the session
+        // rows, with a hairline underline separating it from the sessions below.
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.appHairline(0.06)))
-        .padding(.horizontal, 6)
+        .background(Color.appHairline(0.06))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.appHairline(0.12)).frame(height: 1)
+        }
         .contextMenu {
             if !closableSessions.isEmpty {
                 Button("Close All \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",

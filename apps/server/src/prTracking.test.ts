@@ -119,6 +119,45 @@ describe("classifyPrActivity", () => {
     expect(result.events).toEqual([{ kind: "needsDecision", reason: "a reviewer requested changes" }]);
   });
 
+  it("ignores the tracking agent's own comments/reviews so it doesn't echo-fire", () => {
+    const prev = { ...emptySnapshot(), baselined: true };
+    const result = classifyPrActivity(
+      prev,
+      activity({
+        comments: [
+          { id: "c1", author: "juanone", body: "posted my review" },
+          { id: "c2", author: "reviewer", body: "actual feedback" },
+        ],
+        reviews: [{ id: "r1", author: "juanone", body: "self review", state: "COMMENTED" }],
+      }),
+      "JuanOne", // viewer login, case-insensitive
+    );
+    // Only the outside reviewer's comment fires; our own comment + review are dropped.
+    expect(result.events).toEqual([{ kind: "autoFix", reason: "1 new comment from @reviewer" }]);
+    // But our own items are still baselined so they never re-surface later.
+    expect(result.snapshot.seenCommentIds).toEqual(new Set(["c1", "c2"]));
+    expect(result.snapshot.seenReviewIds).toEqual(new Set(["r1"]));
+  });
+
+  it("emits no events when the only new activity is self-authored", () => {
+    const prev = { ...emptySnapshot(), baselined: true };
+    const result = classifyPrActivity(
+      prev,
+      activity({ comments: [{ id: "c1", author: "juanone", body: "@mergifyio queue" }] }),
+      "juanone",
+    );
+    expect(result.events).toEqual([]);
+  });
+
+  it("does not filter any author when no viewer login is known", () => {
+    const prev = { ...emptySnapshot(), baselined: true };
+    const result = classifyPrActivity(
+      prev,
+      activity({ comments: [{ id: "c1", author: "juanone", body: "hi" }] }),
+    );
+    expect(result.events).toEqual([{ kind: "autoFix", reason: "1 new comment from @juanone" }]);
+  });
+
   it("emits a single closed event when the PR merges or closes, ignoring other activity", () => {
     const prev = { ...emptySnapshot(), baselined: true };
     const merged = classifyPrActivity(

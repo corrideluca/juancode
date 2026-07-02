@@ -30,8 +30,15 @@ struct ChangesPanel: View {
     /// The path of the file selected in the tree (the diff list scrolls to it).
     @State private var selectedPath: String?
     /// Paths whose diff card is collapsed (GitHub-style per-file collapse). All
-    /// files are shown; collapsing just folds a card to its header.
+    /// files are shown; collapsing just folds a card to its header. Files start
+    /// collapsed by default — see `syncSelectionAndExpansion`.
     @State private var collapsedFiles: Set<String> = []
+    /// Paths that have already been given their default (collapsed) state, so a
+    /// diff reload or source switch doesn't re-collapse cards the user reopened.
+    @State private var collapseSeeded: Set<String> = []
+    /// One-shot guard so the programmatic tree selection on load scrolls to the
+    /// first card without expanding it (keeps "all collapsed by default" honest).
+    @State private var suppressSelectExpand = false
     /// Closing-note composer for "Submit review".
     @State private var showSubmit = false
     @State private var finalNote = ""
@@ -170,9 +177,18 @@ struct ChangesPanel: View {
             expanded = directoryNodeIDs(buildFileTree(files))
             seededExpansion = true
         }
+        // Every file starts collapsed the first time it appears (across reloads and
+        // source switches), while respecting cards the user has since reopened.
+        let newlySeen = files.map(\.path).filter { !collapseSeeded.contains($0) }
+        if !newlySeen.isEmpty {
+            collapsedFiles.formUnion(newlySeen)
+            collapseSeeded.formUnion(newlySeen)
+        }
         if files.isEmpty {
             selectedPath = nil
         } else if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
+            // Programmatic selection: scroll to the first card but leave it collapsed.
+            suppressSelectExpand = true
             selectedPath = files.first?.path
         }
     }
@@ -459,9 +475,15 @@ struct ChangesPanel: View {
                     .padding(10)
                 }
                 // Clicking a file in the tree scrolls to its card (and expands it).
+                // The initial programmatic selection only scrolls — it leaves the
+                // card collapsed so the panel opens fully folded.
                 .onChange(of: selectedPath) { _, path in
                     guard let path else { return }
-                    collapsedFiles.remove(path)
+                    if suppressSelectExpand {
+                        suppressSelectExpand = false
+                    } else {
+                        collapsedFiles.remove(path)
+                    }
                     withAnimation { proxy.scrollTo(path, anchor: .top) }
                 }
             }

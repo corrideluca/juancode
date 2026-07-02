@@ -114,7 +114,14 @@ public struct TrackedPr: Sendable, Identifiable, Equatable, Codable {
 ///
 /// On the first poll (`!prev.baselined`) we only record the baseline and emit no
 /// events, so tracking an already-busy PR doesn't replay its whole history.
-public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity) -> PrClassification {
+///
+/// `viewerLogin` is the authenticated `gh` account the tracking agent posts as. Its
+/// own comments/reviews (the agent's code review, `@mergifyio queue`, replies) are
+/// NOT new activity — reacting to them re-fires the poller and drives the agent to
+/// comment again, an echo loop. So self-authored items are recorded into the
+/// baseline (so they never re-surface) but never generate events. Empty ⇒ no filter.
+public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity,
+                               viewerLogin: String = "") -> PrClassification {
     let allCommentIds = Set(activity.comments.map(\.id))
     let allReviewIds = Set(activity.reviews.map(\.id))
     let next = PrTrackSnapshot(
@@ -136,16 +143,20 @@ public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity) -> P
         return PrClassification(snapshot: next, events: [])
     }
 
+    // Case-insensitive "authored by the tracking agent itself".
+    let viewer = viewerLogin.lowercased()
+    func isSelf(_ author: String) -> Bool { !viewer.isEmpty && author.lowercased() == viewer }
+
     var events: [TrackEvent] = []
 
-    let newComments = activity.comments.filter { !prev.seenCommentIds.contains($0.id) }
+    let newComments = activity.comments.filter { !prev.seenCommentIds.contains($0.id) && !isSelf($0.author) }
     if !newComments.isEmpty {
         let who = orderedUniqueAuthors(newComments.map(\.author))
         let n = newComments.count
         events.append(.autoFix("\(n) new comment\(n == 1 ? "" : "s")\(who.isEmpty ? "" : " from \(who)")"))
     }
 
-    for r in activity.reviews where !prev.seenReviewIds.contains(r.id) {
+    for r in activity.reviews where !prev.seenReviewIds.contains(r.id) && !isSelf(r.author) {
         let who = r.author.isEmpty ? "a reviewer" : "@\(r.author)"
         switch r.state {
         case "CHANGES_REQUESTED":
@@ -166,7 +177,7 @@ public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity) -> P
     // Codex normally does the code review before a PR is queued for merge. When it
     // posts that it's out of review capacity, Claude has to step in and review the PR
     // itself (see `trackSeedPrompt`), so surface that as its own auto-fix signal.
-    let newReviews = activity.reviews.filter { !prev.seenReviewIds.contains($0.id) }
+    let newReviews = activity.reviews.filter { !prev.seenReviewIds.contains($0.id) && !isSelf($0.author) }
     let codexTappedOut = newComments.contains { isCodexReviewLimitNotice($0.body) }
         || newReviews.contains { isCodexReviewLimitNotice($0.body) }
     if codexTappedOut {

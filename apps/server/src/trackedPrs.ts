@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getPrActivity as realGetPrActivity } from "./gh.ts";
+import { getPrActivity as realGetPrActivity, getViewerLogin as realGetViewerLogin } from "./gh.ts";
 import { registry } from "./registry.ts";
 import { sessionDb } from "./db.ts";
 import { messageQueue } from "./messageQueue.ts";
@@ -65,6 +65,8 @@ function keyOf(cwd: string, number: number): string {
 /** Injectable dependencies, defaulted to the real ones (overridden in tests). */
 export interface TrackedPrDeps {
   getPrActivity: (cwd: string, number: number) => Promise<PrActivity | null>;
+  /** The authenticated `gh` login, so the classifier can ignore the agent's own comments. */
+  getViewerLogin: (cwd: string) => Promise<string>;
   /** Spawn a dedicated tracking session; returns its id, or null on failure. */
   spawnSession: (cwd: string) => string | null;
   /** Whether a session is currently live. */
@@ -79,6 +81,7 @@ export interface TrackedPrDeps {
 
 const defaultDeps: TrackedPrDeps = {
   getPrActivity: realGetPrActivity,
+  getViewerLogin: realGetViewerLogin,
   spawnSession: (cwd) => {
     try {
       // skipPermissions so the autonomous fixer can commit/push without prompting,
@@ -238,10 +241,11 @@ export class TrackedPrRegistry {
       if (!start) continue;
       const activity = await this.deps.getPrActivity(start.cwd, start.number);
       if (!activity) continue;
+      const viewerLogin = await this.deps.getViewerLogin(start.cwd);
       const entry = this.tracked.get(key); // re-read: may have been untracked while awaiting
       if (!entry) continue;
 
-      const result = classifyPrActivity(entry.snapshot, activity);
+      const result = classifyPrActivity(entry.snapshot, activity, viewerLogin);
       entry.snapshot = result.snapshot;
       entry.lastPolledAt = Date.now();
 

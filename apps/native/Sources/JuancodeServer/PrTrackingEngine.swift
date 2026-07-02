@@ -153,9 +153,12 @@ public actor PrTrackingEngine {
         for (key, pr) in tracked {
             let cwd = pr.cwd, number = pr.number
             guard let activity = await getPrActivity(cwd, number: number) else { continue }
+            // The authenticated `gh` login, so the classifier ignores the agent's own
+            // comments/reviews and doesn't echo-fire on them.
+            let viewerLogin = await getViewerLogin(cwd)
             guard var entry = tracked[key] else { continue } // untracked while off-actor
 
-            let result = classifyPrActivity(prev: entry.snapshot, activity: activity)
+            let result = classifyPrActivity(prev: entry.snapshot, activity: activity, viewerLogin: viewerLogin)
             entry.snapshot = result.snapshot
             entry.lastPolledAt = nowMs()
 

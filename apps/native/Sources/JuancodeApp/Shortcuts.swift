@@ -24,6 +24,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case toggleTerminal
     case oracle
     case globalIssues
+    case focusSessionSearch
 
     var id: String { rawValue }
 
@@ -40,6 +41,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleTerminal: return "Toggle Terminal"
         case .oracle: return "Oracle (chat)"
         case .globalIssues: return "Global Issues"
+        case .focusSessionSearch: return "Find Sessions"
         }
     }
 
@@ -56,6 +58,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
         case .oracle: return KeyBinding(key: "space", control: true)
         case .globalIssues: return KeyBinding(key: "i", command: true, shift: true)
+        case .focusSessionSearch: return KeyBinding(key: "f", control: true)
         }
     }
 }
@@ -215,5 +218,6 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .toggleTerminal: model.toggleBottomTerminal()
     case .oracle: oracle.toggleChatFocused()
     case .globalIssues: oracle.open(tab: .issues)
+    case .focusSessionSearch: model.focusSessionSearch()
     }
 }

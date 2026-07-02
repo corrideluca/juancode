@@ -272,6 +272,12 @@ struct JuancodeApp: App {
                     performShortcut(.globalIssues, model: model, oracle: oracle)
                 }
                 .appShortcut(.globalIssues, shortcuts)
+                // ⌃F drops focus into the sidebar's "Filter sessions…" field from
+                // anywhere so you can start a find without reaching for the mouse.
+                Button("Find Sessions") {
+                    performShortcut(.focusSessionSearch, model: model, oracle: oracle)
+                }
+                .appShortcut(.focusSessionSearch, shortcuts)
             }
         }
 

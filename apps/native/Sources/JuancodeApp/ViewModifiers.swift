@@ -108,7 +108,13 @@ struct DragResizeHandle: View {
             }
         }
         .gesture(
-            DragGesture()
+            // Measure in the global space: a live-resize handle (e.g. the project
+            // sessions box) sits below the pane it grows, so relayout pushes the
+            // handle itself under the cursor mid-drag. In `.local` space that view
+            // movement feeds back into `translation` and the drag jitters; `.global`
+            // is anchored to the screen and is unaffected. Identical to `.local` for
+            // the preview handles, whose panes stay put during the drag.
+            DragGesture(coordinateSpace: .global)
                 .onChanged { v in
                     dragging = true
                     let start = dragStart ?? value
