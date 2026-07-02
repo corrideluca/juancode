@@ -105,6 +105,8 @@ final class AppModel {
     var showingRecurringTasks = false
     /// Link-based GitHub Projects / board priority panel.
     var showingGithubBoards = false
+    /// Right-docked GitHub Actions run panel.
+    var showingGithubActions = false
     /// ⌘K prompt-template palette (juancode-2vd): quick-insert saved prompts.
     var showingPromptPalette = false
     /// Saved prompt templates, loaded from `UserDefaults` on launch. Mutated through
@@ -119,6 +121,10 @@ final class AppModel {
     var githubBoards: [GithubProjectBoard] = []
     var githubBoardItems: [String: GithubProjectItemsResult] = [:]
     var githubBoardLoading: Set<String> = []
+    var githubActionsRepo = "Good-Authority/satori-nextjs"
+    var githubActionsRuns: [GithubActionRun] = []
+    var githubActionsLoading = false
+    var githubActionsError: String?
     /// Controls the session-template launcher/manager sheet.
     var showingSessionTemplates = false
     var errorMessage: String?
@@ -1701,6 +1707,34 @@ final class AppModel {
         let body = issue.body.trimmingCharacters(in: .whitespacesAndNewlines)
         if !body.isEmpty { parts.append("\nDescription:\n\(body)") }
         return parts.joined(separator: "\n")
+    }
+
+    // MARK: - GitHub Actions
+
+    func toggleGithubActions() {
+        showingGithubActions.toggle()
+        if showingGithubActions, githubActionsRuns.isEmpty {
+            refreshGithubActions()
+        }
+    }
+
+    func refreshGithubActions() {
+        guard !githubActionsLoading else { return }
+        githubActionsLoading = true
+        githubActionsError = nil
+        let repo = githubActionsRepo.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                await getGithubActionRuns(repo: repo, cwd: Config.defaultCwd)
+            }.value
+            githubActionsLoading = false
+            if result.available {
+                githubActionsRuns = result.runs
+                githubActionsError = nil
+            } else {
+                githubActionsError = result.error ?? "Could not load GitHub Actions"
+            }
+        }
     }
 
     /// Spawn `count` sessions from a template. Each is a normal `create` — same

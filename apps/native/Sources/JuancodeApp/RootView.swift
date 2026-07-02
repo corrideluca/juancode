@@ -71,6 +71,15 @@ struct RootView: View {
                       ? "GitHub boards — add project board links and priorities"
                       : "\(model.githubBoards.count) GitHub board link(s)")
                 .clickCursor()
+                Button { model.toggleGithubActions() } label: {
+                    Label("GitHub Actions", systemImage: model.githubActionsRuns.contains(where: { actionRunProblem($0) })
+                          ? "play.square.stack.fill" : "play.square.stack")
+                }
+                .help(model.showingGithubActions
+                      ? "Hide GitHub Actions"
+                      : "Show GitHub Actions for \(model.githubActionsRepo)")
+                .foregroundStyle(model.githubActionsRuns.contains(where: { actionRunProblem($0) }) ? Color.orange : Color.primary)
+                .clickCursor()
                 Button { oracle.open(tab: .issues) } label: {
                     Label("Issues", systemImage: "tray.full")
                 }
@@ -92,6 +101,7 @@ struct RootView: View {
         // collapsing Oracle reveals the editor underneath. Both are `.overlay`s, so
         // neither reflows the split view beneath — no layout shift on open/close.
         .overlay { OracleDock() }
+        .overlay { GithubActionsDock() }
         .sheet(isPresented: $model.showingWorktrees) {
             WorktreesSheet()
         }
