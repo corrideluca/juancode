@@ -15,6 +15,9 @@ public enum NotificationEvent: String, Sendable, Equatable {
     case waitingInput = "waiting_input"
     /// A turn simply finished.
     case turnEnd = "turn_end"
+    /// A session's folder holds uncommitted/unpushed work and the session went
+    /// idle or exited — the work is about to be forgotten (juancode-rxu).
+    case workAtRisk = "work_at_risk"
 }
 
 /// The human-readable one-liner (the Slack `text`).
@@ -23,6 +26,7 @@ public func notificationText(event: NotificationEvent, title: String) -> String 
     switch event {
     case .waitingInput: return "⏳ \(name) needs your input"
     case .turnEnd: return "✅ \(name) finished a turn"
+    case .workAtRisk: return "⚠️ \(name) has uncommitted or unpushed work"
     }
 }
 

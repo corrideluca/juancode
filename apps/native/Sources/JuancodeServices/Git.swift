@@ -36,7 +36,8 @@ public struct GitError: Error, Sendable {
 }
 
 /// Run git, returning stdout. `git diff` exits 1 when differences exist — not an error.
-private func git(_ cwd: String, _ args: [String]) async throws -> String {
+/// Internal so sibling services (WorkAtRisk probe) reuse the same runner semantics.
+func git(_ cwd: String, _ args: [String]) async throws -> String {
     // `capture` returns the result for ANY exit code and only throws on
     // launch-failure/timeout, so we inspect the exit code ourselves: exit 1 with
     // stdout means `git diff` "has changes"; any other non-zero is a real error.

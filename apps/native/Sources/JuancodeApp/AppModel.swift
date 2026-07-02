@@ -136,6 +136,7 @@ final class AppModel {
         restorePromptTemplates()
         restoreSessionTemplates()
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
+        startWorkAtRiskLoop() // periodic dirty/unpushed scan (juancode-rxu)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on,
         // and marks the desktop active so the phone-push gate stays quiet (juancode-2zp).
@@ -436,16 +437,21 @@ final class AppModel {
     /// bounce, so it respects the same "not the session you're watching" suppression.
     /// Best-effort and fire-and-forget — a webhook failure never touches the UI.
     private func fireNotificationWebhook(sessionId: String, state: SessionActivity) {
+        let meta = (sessions + externalSessions).first { $0.id == sessionId }
+        postNotificationWebhook(event: state == .waitingInput ? .waitingInput : .turnEnd,
+                                title: meta?.title ?? "", sessionId: sessionId, cwd: meta?.cwd ?? "")
+    }
+
+    /// The shared webhook POST: build the body and fire-and-forget it at the
+    /// configured URL (no-op when none is set). Used by turn-end and work-at-risk.
+    private func postNotificationWebhook(event: NotificationEvent, title: String,
+                                         sessionId: String, cwd: String) {
         let raw = notifyWebhookUrl.trimmingCharacters(in: .whitespaces)
         guard !raw.isEmpty, let url = URL(string: raw), url.scheme?.hasPrefix("http") == true else { return }
-        let meta = (sessions + externalSessions).first { $0.id == sessionId }
-        let event: NotificationEvent = state == .waitingInput ? .waitingInput : .turnEnd
-        let body = webhookBody(event: event, title: meta?.title ?? "",
-                               sessionId: sessionId, cwd: meta?.cwd ?? "")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = body
+        req.httpBody = webhookBody(event: event, title: title, sessionId: sessionId, cwd: cwd)
         req.timeoutInterval = 10
         Task.detached { _ = try? await URLSession.shared.data(for: req) }
     }
@@ -2182,6 +2188,158 @@ final class AppModel {
         if !worktrees.isEmpty {
             Task { for wt in worktrees { try? await removeWorktree(wt) } }
         }
+    }
+
+    // MARK: - Work at risk (uncommitted/unpushed scanner) — juancode-rxu
+
+    /// Folders holding uncommitted or unpushed work, keyed by normalized path.
+    /// Only at-risk entries are held; each scan pass replaces the whole map.
+    var workAtRiskByPath: [String: WorkAtRisk] = [:]
+
+    /// Panel-ready list: session-attached folders first, orphaned worktrees last.
+    var workAtRiskList: [WorkAtRisk] {
+        workAtRiskByPath.values.sorted {
+            if $0.orphaned != $1.orphaned { return !$0.orphaned }
+            return $0.path.localizedCompare($1.path) == .orderedAscending
+        }
+    }
+
+    /// The at-risk entry for a session's folder, if any — the sidebar badge lookup.
+    func workAtRisk(forSession meta: SessionMeta) -> WorkAtRisk? {
+        if let wt = meta.worktreePath,
+           let hit = workAtRiskByPath[WorkAtRiskScan.normalize(wt)] { return hit }
+        return workAtRiskByPath[WorkAtRiskScan.normalize(meta.cwd)]
+    }
+
+    /// A raised "this session's work is about to be forgotten" notice, listed in
+    /// the notifications bell until dismissed. One per session at a time.
+    struct WorkAtRiskNotice: Identifiable, Equatable, Sendable {
+        var id: String { sessionId }
+        var sessionId: String
+        var title: String
+        var path: String
+        var createdAt: Int
+    }
+    var workAtRiskNotices: [WorkAtRiskNotice] = []
+
+    func dismissWorkAtRiskNotice(_ id: String) {
+        workAtRiskNotices.removeAll { $0.id == id }
+    }
+
+    /// Scan cadence. Coarse — forgotten work is a minutes-scale concern, and each
+    /// pass shells `git status` into every distinct session folder and worktree.
+    private let workAtRiskInterval: Duration = .seconds(45)
+    /// How long a non-busy session must sit silent before its at-risk work nudges.
+    private let workAtRiskIdleNudgeMs = 15 * 60_000
+    @ObservationIgnored private var workAtRiskLoop: Task<Void, Never>?
+    @ObservationIgnored private var workAtRiskScanInFlight = false
+    /// Sessions already nudged for the current at-risk episode of their folder;
+    /// cleared when the folder comes clean or the session goes busy again, so a
+    /// new episode re-alerts (mirrors `dismissedHealth`'s recover-then-fail rule).
+    @ObservationIgnored private var workAtRiskNudged: Set<String> = []
+
+    private func startWorkAtRiskLoop() {
+        guard workAtRiskLoop == nil else { return }
+        workAtRiskLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.scanWorkAtRiskOnce()
+                try? await Task.sleep(for: self?.workAtRiskInterval ?? .seconds(45))
+            }
+        }
+    }
+
+    /// One pass: collect scan roots (session folders + every worktree of the repos
+    /// in play, including orphans), probe them off the main actor, publish the
+    /// at-risk map, then nudge sessions whose work looks forgotten.
+    func scanWorkAtRiskOnce() async {
+        guard !workAtRiskScanInFlight else { return }
+        workAtRiskScanInFlight = true
+        defer { workAtRiskScanInFlight = false }
+
+        let sessionRefs = sessions
+            .filter { $0.cwd != OraclePaths.controlDir }
+            .map { WorkAtRiskScan.SessionRef(id: $0.id, cwd: $0.cwd, worktreePath: $0.worktreePath) }
+
+        let results = await Task.detached(priority: .utility) { () -> [String: WorkAtRisk] in
+            // One worktree listing per repo: `git worktree list` from any worktree
+            // returns the whole set with the main one first (stable per-repo key).
+            var worktreesByRepo: [String: [Worktree]] = [:]
+            for cwd in Set(sessionRefs.map(\.cwd) + sessionRefs.compactMap(\.worktreePath)) {
+                let trees = await listWorktrees(cwd)
+                guard let main = trees.first(where: { $0.main }) else { continue }
+                if worktreesByRepo[main.path] == nil { worktreesByRepo[main.path] = trees }
+            }
+            let roots = WorkAtRiskScan.collectRoots(sessions: sessionRefs,
+                                                    worktreesByRepo: worktreesByRepo)
+            // Probe with bounded concurrency — a wide scan shouldn't fork a git
+            // process per folder all at once.
+            var out: [String: WorkAtRisk] = [:]
+            await withTaskGroup(of: WorkAtRisk?.self) { group in
+                var next = 0
+                func enqueue() {
+                    guard next < roots.count else { return }
+                    let root = roots[next]; next += 1
+                    group.addTask {
+                        guard let probed = await probeWorkAtRisk(root.path) else { return nil }
+                        return WorkAtRiskScan.classify(root, state: probed.state,
+                                                       dirtyFiles: probed.dirtyFiles,
+                                                       aheadOfBase: probed.aheadOfBase)
+                    }
+                }
+                for _ in 0..<4 { enqueue() }
+                while let risk = await group.next() {
+                    if let risk { out[risk.path] = risk }
+                    enqueue()
+                }
+            }
+            return out
+        }.value
+
+        workAtRiskByPath = results
+
+        // Episode reset: forget a nudge once the session's folder is clean again,
+        // the session went back to work, or the session is gone.
+        workAtRiskNudged = workAtRiskNudged.filter { id in
+            guard let meta = sessions.first(where: { $0.id == id }) else { return false }
+            return workAtRisk(forSession: meta) != nil && activity(id) != .busy
+        }
+
+        // Nudge pass. Read live last-output straight from the registry — the
+        // published `sessions` snapshot's `updatedAt` can lag (see health loop).
+        let liveMeta = Dictionary(appState.registry.all().map { ($0.id, $0.meta) },
+                                  uniquingKeysWith: { a, _ in a })
+        let metasById = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let inputs: [WorkAtRiskScan.NudgeInput] = sessions
+            .filter { $0.cwd != OraclePaths.controlDir }
+            .map { meta in
+                WorkAtRiskScan.NudgeInput(
+                    id: meta.id, atRisk: workAtRisk(forSession: meta) != nil,
+                    status: meta.status, isLive: liveMeta[meta.id] != nil,
+                    activity: activity(meta.id),
+                    lastOutputMs: liveMeta[meta.id]?.updatedAt ?? meta.updatedAt)
+            }
+        let due = WorkAtRiskScan.nudges(inputs, nowMs: nowMs(),
+                                        idleMs: workAtRiskIdleNudgeMs,
+                                        alreadyNudged: workAtRiskNudged)
+        guard !due.isEmpty else { return }
+        // All due sessions are spent for this episode, but raise only one notice
+        // per folder (several exited sessions often share a dirty cwd — one launch
+        // shouldn't stack N identical alerts), fronted by the freshest session.
+        workAtRiskNudged.formUnion(due)
+        var noticedPaths = Set(workAtRiskNotices.map(\.path))
+        let dueMetas = due.compactMap { metasById[$0] }.sorted { $0.updatedAt > $1.updatedAt }
+        var raised = false
+        for meta in dueMetas {
+            guard let risk = workAtRisk(forSession: meta),
+                  noticedPaths.insert(risk.path).inserted else { continue }
+            workAtRiskNotices.removeAll { $0.sessionId == meta.id }
+            workAtRiskNotices.append(WorkAtRiskNotice(
+                sessionId: meta.id, title: meta.title, path: risk.path, createdAt: nowMs()))
+            postNotificationWebhook(event: .workAtRisk, title: meta.title,
+                                    sessionId: meta.id, cwd: risk.path)
+            raised = true
+        }
+        if raised { NSApp.requestUserAttention(.informationalRequest) }
     }
 }
 

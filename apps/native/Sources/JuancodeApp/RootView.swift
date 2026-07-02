@@ -40,9 +40,13 @@ struct RootView: View {
                 .help("Linear issues under watch — do-or-escalate loops")
                 .clickCursor()
                 Button { model.showingWorktrees = true; model.loadWorktrees() } label: {
-                    Label("Worktrees", systemImage: "externaldrive.badge.minus")
+                    Label("Worktrees", systemImage: model.workAtRiskList.isEmpty
+                          ? "externaldrive.badge.minus" : "externaldrive.badge.exclamationmark")
                 }
-                .help("Manage / clean git worktrees")
+                .help(model.workAtRiskList.isEmpty
+                      ? "Manage / clean git worktrees"
+                      : "\(model.workAtRiskList.count) folder(s) with uncommitted or unpushed work")
+                .foregroundStyle(model.workAtRiskList.isEmpty ? Color.primary : Color.orange)
                 .clickCursor()
                 Button { model.showingSessionHealth = true } label: {
                     Label("Session Health", systemImage: model.unhealthySessions.isEmpty
@@ -222,15 +226,17 @@ private struct NotificationsBell: View {
     @State private var showing = false
 
     private var unread: [SessionMeta] { model.unreadSessionMetas }
+    private var atRiskNotices: [AppModel.WorkAtRiskNotice] { model.workAtRiskNotices }
+    private var hasAny: Bool { !unread.isEmpty || !atRiskNotices.isEmpty }
 
     var body: some View {
         Button { showing = true } label: {
-            Label("Notifications", systemImage: unread.isEmpty ? "bell" : "bell.badge.fill")
+            Label("Notifications", systemImage: hasAny ? "bell.badge.fill" : "bell")
         }
-        .help(unread.isEmpty
-              ? "Notifications — sessions that finished or need a reply"
-              : "\(unread.count) session(s) with unread activity")
-        .foregroundStyle(unread.isEmpty ? Color.primary : Color.red)
+        .help(hasAny
+              ? "\(unread.count) unread · \(atRiskNotices.count) work-at-risk"
+              : "Notifications — sessions that finished or need a reply")
+        .foregroundStyle(!unread.isEmpty ? Color.red : (atRiskNotices.isEmpty ? Color.primary : Color.orange))
         .clickCursor()
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
@@ -267,6 +273,52 @@ private struct NotificationsBell: View {
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .clickCursor()
                     }
+                }
+                // Work-at-risk: folders with uncommitted/unpushed work whose session
+                // went idle or exited (juancode-rxu). Clicking opens the Worktrees
+                // panel where the full list + actions live.
+                if !atRiskNotices.isEmpty {
+                    Divider().padding(.vertical, 4)
+                    Text("Work at risk")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 10).padding(.bottom, 4)
+                    ForEach(atRiskNotices) { notice in
+                        HStack(spacing: 8) {
+                            Button {
+                                model.showingWorktrees = true
+                                model.loadWorktrees()
+                                showing = false
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.system(size: 11)).foregroundStyle(.orange)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(notice.title.isEmpty ? "A session" : notice.title)
+                                            .font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                        Text((notice.path as NSString).lastPathComponent)
+                                            .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                    Spacer(minLength: 8)
+                                }
+                                .contentShape(Rectangle())
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .clickCursor()
+                            Button {
+                                model.dismissWorkAtRiskNotice(notice.id)
+                            } label: {
+                                Image(systemName: "xmark").font(.system(size: 9))
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Dismiss")
+                            .clickCursor()
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                    }
+                } else if unread.isEmpty {
+                    // (the "Nothing unread" text above already covers the empty case)
+                    EmptyView()
                 }
             }
             .frame(width: 280)
@@ -689,6 +741,7 @@ struct SidebarView: View {
                           tracked: external ? nil : model.trackedPr(forSession: meta.id),
                           trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
                           unread: model.unreadSessions.contains(meta.id),
+                          atRisk: !external && model.workAtRisk(forSession: meta) != nil,
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
                           selected: model.selection == meta.id)
     }
@@ -747,6 +800,11 @@ private struct FolderHeader: View {
         group.sessions.filter { model.unreadSessions.contains($0.id) }.count
     }
 
+    /// Sessions in this project whose folder holds uncommitted/unpushed work.
+    private var atRiskCount: Int {
+        group.sessions.filter { model.workAtRisk(forSession: $0) != nil }.count
+    }
+
     /// Own sessions we can close in bulk. Discovered/external sessions aren't ours
     /// to delete (their row only offers "Resume"), so they're excluded.
     private var closableSessions: [SessionMeta] {
@@ -793,6 +851,18 @@ private struct FolderHeader: View {
                                 .foregroundStyle(.red)
                         }
                         .help("\(unreadCount) session(s) here with unread activity")
+                    }
+                    // Work-at-risk roll-up: an orange warning + count when any session
+                    // here sits on uncommitted/unpushed work (juancode-rxu).
+                    if atRiskCount > 0 {
+                        HStack(spacing: 3) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 8))
+                            Text("\(atRiskCount)")
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        }
+                        .foregroundStyle(.orange)
+                        .help("\(atRiskCount) session(s) here with uncommitted or unpushed work")
                     }
                     Spacer(minLength: 8)
                 }
@@ -1285,6 +1355,9 @@ struct SessionRow: View {
     var trackedIssue: TrackedIssue? = nil
     /// Pending turn-end notification for this session — shows an unread dot until viewed.
     var unread: Bool = false
+    /// This session's folder holds uncommitted/unpushed work (juancode-rxu) — shows
+    /// a small warning capsule on the trailing edge.
+    var atRisk: Bool = false
     /// Resume action for an external row; the row is otherwise non-interactive.
     var onResume: (() -> Void)? = nil
     /// Whether this row is the current selection — drives showing the external
@@ -1321,6 +1394,13 @@ struct SessionRow: View {
             prCapsule(t)
         } else if showIssue, let ti = trackedIssue {
             issueCapsule(ti)
+        }
+        if atRisk, !external {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+                .help("Uncommitted or unpushed work in this folder")
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
         }
         if external, let onResume, hovering || selected {
             Button(action: onResume) {

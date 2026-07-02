@@ -60,7 +60,7 @@ struct WorktreesSheet: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.worktreeGroups.isEmpty {
+        if model.worktreeGroups.isEmpty && model.workAtRiskList.isEmpty {
             VStack(spacing: 6) {
                 Spacer()
                 Image(systemName: "externaldrive").font(.largeTitle).foregroundStyle(.secondary)
@@ -74,6 +74,7 @@ struct WorktreesSheet: View {
         } else {
             ScrollView {
                 VStack(spacing: 0) {
+                    workAtRiskSection
                     ForEach(model.worktreeGroups) { group in
                         WorktreeProjectHeader(
                             group: group,
@@ -86,7 +87,10 @@ struct WorktreesSheet: View {
                         Divider()
                         if !collapsed.contains(group.id) {
                             ForEach(group.children, id: \.path) { wt in
-                                WorktreeRow(wt: wt, inUse: model.worktreeInUse(wt.path)) { confirmRemove = wt }
+                                WorktreeRow(
+                                    wt: wt, inUse: model.worktreeInUse(wt.path),
+                                    atRisk: model.workAtRiskByPath[WorkAtRiskScan.normalize(wt.path)] != nil
+                                ) { confirmRemove = wt }
                                 Divider()
                             }
                             if group.children.isEmpty {
@@ -101,6 +105,76 @@ struct WorktreesSheet: View {
                 }
             }
         }
+    }
+
+    /// Work-at-risk section (juancode-rxu): folders holding uncommitted/unpushed
+    /// work, including orphaned worktrees whose sessions are gone. Sits atop the
+    /// worktree list so forgotten work is the first thing you see here.
+    @ViewBuilder private var workAtRiskSection: some View {
+        let list = model.workAtRiskList
+        if !list.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+                Text("Work at risk (\(list.count))")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            Divider()
+            ForEach(list) { risk in
+                WorkAtRiskRow(
+                    risk: risk,
+                    newSession: { model.createInFolder(provider: .claude, cwd: risk.path); dismiss() },
+                    reveal: {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: risk.path)])
+                    })
+                Divider()
+            }
+        }
+    }
+}
+
+/// One folder holding at-risk work: name, path, branch, and tags describing how
+/// it's at risk, with actions to open a session there or reveal it in Finder.
+private struct WorkAtRiskRow: View {
+    let risk: WorkAtRisk
+    let newSession: () -> Void
+    let reveal: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: risk.orphaned ? "arrow.triangle.branch" : "pencil.and.list.clipboard")
+                .font(.system(size: 12)).foregroundStyle(.orange).frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text((risk.path as NSString).lastPathComponent)
+                    .font(.system(size: 13, weight: .medium)).lineLimit(1)
+                Text(risk.path)
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            if let b = risk.branch {
+                Text(b).font(.system(size: 10).monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(1).help("Branch")
+            }
+            if risk.dirtyFiles > 0 { tag("\(risk.dirtyFiles) dirty", .orange) }
+            if risk.ahead > 0 { tag("\(risk.ahead) unpushed", .orange) }
+            if risk.noUpstream { tag("no upstream", .secondary) }
+            if risk.orphaned { tag("orphaned", .red) }
+            Button(action: newSession) { Image(systemName: "plus.circle") }
+                .buttonStyle(.borderless).help("New session in this folder").clickCursor()
+            Button(action: reveal) { Image(systemName: "folder") }
+                .buttonStyle(.borderless).help("Reveal in Finder").clickCursor()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    private func tag(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(color.opacity(0.2)).foregroundStyle(color)
+            .clipShape(Capsule())
     }
 }
 
@@ -152,6 +226,8 @@ private struct WorktreeProjectHeader: View {
 private struct WorktreeRow: View {
     let wt: Worktree
     let inUse: Bool
+    /// This worktree holds uncommitted/unpushed work (juancode-rxu).
+    var atRisk: Bool = false
     let remove: () -> Void
 
     var body: some View {
@@ -174,6 +250,9 @@ private struct WorktreeRow: View {
                 tag("main", .secondary)
             } else if inUse {
                 tag("in use", .blue)
+            }
+            if atRisk {
+                tag("at risk", .orange)
             }
             if !wt.main {
                 Button(role: .destructive, action: remove) { Image(systemName: "trash") }
