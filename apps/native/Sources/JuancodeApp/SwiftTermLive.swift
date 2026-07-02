@@ -504,17 +504,23 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             if settleAfterTransition {
                 settleAfterTransition = false
                 if remembersSize { TerminalGrid.remember(cols: g.cols, rows: g.rows) }
-                // Genuine SIGWINCH at the settled grid (see `nudgeResize`, minus
-                // the main-actor view read — `lastGrid` already is the settled
-                // size): drop a row, then restore the real one a beat later.
-                lastSent = nil
-                session.resizeLocal(cols: g.cols, rows: g.rows > 2 ? g.rows - 1 : g.rows + 1)
-                let work = DispatchWorkItem { [weak self] in
-                    guard let self, let g = self.lastGrid else { return }
-                    self.lastSent = g
-                    self.session.resizeLocal(cols: g.cols, rows: g.rows)
+                // Only force the rows-1/rows flap when the settled grid equals
+                // what the pty already has (net-zero toggle — a plain send would
+                // dedup to no SIGWINCH). When the grid changed, one plain resize
+                // is already a genuine SIGWINCH; the extra flap just writes more
+                // mis-wrapped output on a streaming session (juancode-qxb).
+                if let last = lastSent, last.cols == g.cols, last.rows == g.rows {
+                    lastSent = nil
+                    session.resizeLocal(cols: g.cols, rows: g.rows > 2 ? g.rows - 1 : g.rows + 1)
+                    let work = DispatchWorkItem { [weak self] in
+                        guard let self, let g = self.lastGrid else { return }
+                        self.lastSent = g
+                        self.session.resizeLocal(cols: g.cols, rows: g.rows)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: work)
+                } else {
+                    sendResize(cols: g.cols, rows: g.rows)
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: work)
             } else {
                 sendResize(cols: g.cols, rows: g.rows)
             }

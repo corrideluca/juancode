@@ -296,18 +296,22 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// the throttle coalesces the rest, with a guaranteed trailing send for the
         /// final settled size. Also remembered as the next spawn grid.
         ///
-        /// Exception: while a panel open/close (or fullscreen) transition is in
-        /// flight (`LayoutTransitionGate`), every grid in the burst is intermediate,
-        /// so pushing them (even throttled, even just the leading one) makes the CLI
-        /// repaint mid-transition and leave garbled frames behind. Hold everything
-        /// until the layout stays quiet, then assert the settled grid once with a
-        /// genuine SIGWINCH so the TUI fully re-lays-out — see
-        /// `settleAfterTransition` (juancode-1th.2).
+        /// A panel open/close (or fullscreen) transition (`LayoutTransitionGate`)
+        /// stays in lockstep too — juancode-1th.2 held every grid until the layout
+        /// settled, but the surface has *already* reflowed by the time this fires,
+        /// so on a streaming session every byte the CLI printed during the hold
+        /// landed mis-wrapped in scrollback, beyond what any settle repaint can
+        /// heal (juancode-qxb). What a transition still needs over a plain drag is
+        /// the settle pass: once the layout stays quiet it makes sure the CLI
+        /// repainted at the settled grid — see `settleAfterTransition`.
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
             resizeWork?.cancel()
             if LayoutTransitionGate.shared.active {
+                let now = DispatchTime.now()
+                let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
+                if earliest <= now, flushSurfaceGrid() { sentDuringTransition = true }
                 let work = DispatchWorkItem { [weak self] in self?.settleAfterTransition() }
                 resizeWork = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + transitionSettleDelay, execute: work)
@@ -324,34 +328,52 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             }
         }
 
+        /// True when a resize actually reached the pty during the current layout
+        /// transition — read (and reset) by `settleAfterTransition` to decide
+        /// whether the CLI still needs a SIGWINCH at the settled grid.
+        private var sentDuringTransition = false
+
         /// A layout transition finished (no new surface grid for
-        /// `transitionSettleDelay`): remember + assert the settled grid via a forced
-        /// full re-layout. The nudge (not a plain resize) matters for the net-zero
-        /// case — toggling a panel open then closed settles at the grid the pty
-        /// already has, where a plain send would dedup to nothing, no SIGWINCH would
-        /// fire, and the frames the surface reflowed mid-transition would stay
-        /// garbled until a manual resync.
+        /// `transitionSettleDelay`): make sure the CLI has repainted at the settled
+        /// grid — with the *minimum* number of size changes, because every extra
+        /// flap on a streaming session writes more mis-wrapped output into
+        /// scrollback (juancode-qxb).
+        /// - Settled grid already delivered mid-transition → the CLI repainted for
+        ///   it; nothing to do.
+        /// - Pty at a different grid → one plain send (a genuine size change).
+        /// - Net-zero toggle with nothing delivered → the pty never heard a
+        ///   SIGWINCH while the surface reflowed, so force one with the nudge.
         private func settleAfterTransition() {
             guard let g = lastSurfaceGrid else { return }
             if remembersSize { TerminalGrid.remember(cols: g.cols, rows: g.rows) }
-            lastResizeAt = .now()
-            nudge(cols: g.cols, rows: g.rows)
+            let delivered = sentDuringTransition
+            sentDuringTransition = false
+            if let last = lastSent, last.cols == g.cols, last.rows == g.rows {
+                if delivered { return }
+                lastResizeAt = .now()
+                nudge(cols: g.cols, rows: g.rows)
+            } else {
+                sendResize(cols: g.cols, rows: g.rows)
+            }
         }
 
         /// Push the *latest* surface grid to the pty. Reads `lastSurfaceGrid` at fire
         /// time rather than a value captured when the work item was scheduled, so the
         /// throttle's trailing send always asserts the final settled size — never a
         /// stale intermediate that would strand the CLI a few rows short (black band).
-        private func flushSurfaceGrid() {
-            guard let g = lastSurfaceGrid else { return }
-            sendResize(cols: g.cols, rows: g.rows)
+        /// Returns whether a resize actually reached the pty (not deduped/dropped).
+        @discardableResult
+        private func flushSurfaceGrid() -> Bool {
+            guard let g = lastSurfaceGrid else { return false }
+            return sendResize(cols: g.cols, rows: g.rows)
         }
 
-        private func sendResize(cols: Int, rows: Int) {
-            guard cols > 0, rows > 0 else { return }
+        @discardableResult
+        private func sendResize(cols: Int, rows: Int) -> Bool {
+            guard cols > 0, rows > 0 else { return false }
             lastResizeAt = .now()
             if remembersSize { TerminalGrid.remember(cols: cols, rows: rows) }
-            if let last = lastSent, last.cols == cols, last.rows == rows { return }
+            if let last = lastSent, last.cols == cols, last.rows == rows { return false }
             onGrid?(cols, rows)
             // Only cache the grid as sent once the pty actually adopts it. If the
             // session isn't running yet the resize is dropped; leaving `lastSent`
@@ -361,8 +383,10 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // once the TUI settles (juancode-1th.3), so no client-side retry needed.
             if session.resizeLocal(cols: cols, rows: rows) {
                 lastSent = (cols, rows)
+                return true
             } else {
                 lastSent = nil
+                return false
             }
         }
 
@@ -520,14 +544,17 @@ struct GhosttyEphemeral: NSViewRepresentable {
 
         /// Leading+trailing throttle so the pty stays in lockstep with the surface
         /// during a drag — see the main pane's `terminalDidResize` for why a pure
-        /// trailing debounce corrupts the agent's render here, and for why a
-        /// layout transition (panel toggle) instead holds every intermediate grid
-        /// and settles once with a forced re-layout (juancode-1th.2).
+        /// trailing debounce corrupts the agent's render here, and why a layout
+        /// transition (panel toggle) stays in lockstep too, with a settle pass
+        /// that only forces a repaint when nothing was delivered (juancode-qxb).
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
             resizeWork?.cancel()
             if LayoutTransitionGate.shared.active {
+                let now = DispatchTime.now()
+                let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
+                if earliest <= now, flushSurfaceGrid() { sentDuringTransition = true }
                 let work = DispatchWorkItem { [weak self] in self?.settleAfterTransition() }
                 resizeWork = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: work)
@@ -544,32 +571,45 @@ struct GhosttyEphemeral: NSViewRepresentable {
             }
         }
 
-        /// Assert the settled grid after a layout transition with a genuine
-        /// SIGWINCH (rows-1 then the real rows) — a shell prompt redraws fine
-        /// either way, but a TUI running in this pane needs the forced re-layout
-        /// for the same net-zero-toggle reason as the main pane.
+        /// See the main pane's `sentDuringTransition`.
+        private var sentDuringTransition = false
+
+        /// Make sure the pty heard about the settled grid after a layout
+        /// transition — minimum size changes, same tiering as the main pane
+        /// (delivered → nothing; changed → plain send; net-zero → forced
+        /// rows-1/rows SIGWINCH for a TUI running in this pane).
         private func settleAfterTransition() {
             guard let g = lastSurfaceGrid else { return }
-            lastResizeAt = .now()
-            lastSent = (g.cols, g.rows)
-            pty.resize(cols: g.cols, rows: g.rows > 2 ? g.rows - 1 : g.rows + 1)
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
-                self?.pty.resize(cols: g.cols, rows: g.rows)
+            let delivered = sentDuringTransition
+            sentDuringTransition = false
+            if let last = lastSent, last.cols == g.cols, last.rows == g.rows {
+                if delivered { return }
+                lastResizeAt = .now()
+                pty.resize(cols: g.cols, rows: g.rows > 2 ? g.rows - 1 : g.rows + 1)
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
+                    self?.pty.resize(cols: g.cols, rows: g.rows)
+                }
+            } else {
+                send(cols: g.cols, rows: g.rows)
             }
         }
 
         /// Push the latest surface grid to the pty (reads `lastSurfaceGrid` at fire
-        /// time — see the main pane's `flushSurfaceGrid`).
-        private func flushSurfaceGrid() {
-            guard let g = lastSurfaceGrid else { return }
-            send(cols: g.cols, rows: g.rows)
+        /// time — see the main pane's `flushSurfaceGrid`). Returns whether a resize
+        /// was actually sent (not deduped).
+        @discardableResult
+        private func flushSurfaceGrid() -> Bool {
+            guard let g = lastSurfaceGrid else { return false }
+            return send(cols: g.cols, rows: g.rows)
         }
 
-        private func send(cols: Int, rows: Int) {
+        @discardableResult
+        private func send(cols: Int, rows: Int) -> Bool {
             lastResizeAt = .now()
-            if let last = lastSent, last.cols == cols, last.rows == rows { return }
+            if let last = lastSent, last.cols == cols, last.rows == rows { return false }
             lastSent = (cols, rows)
             pty.resize(cols: cols, rows: rows)
+            return true
         }
 
         func terminalDidRingBell() { NSSound.beep() }
