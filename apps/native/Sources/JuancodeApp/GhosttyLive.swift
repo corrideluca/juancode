@@ -197,14 +197,6 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var cancel: (() -> Void)?
         private var streaming = false
         private var resizeWork: DispatchWorkItem?
-        /// Retry for a resize the pty didn't adopt because it wasn't running yet
-        /// (a resize racing session spawn). The surface won't re-fire once the size
-        /// settles, so without this the CLI would boot at its startup grid and stay
-        /// there — the local twin of the WS `resizeAck` retry (juancode-uz6).
-        private var resizeRetryWork: DispatchWorkItem?
-        private var resizeRetries = 0
-        private let maxResizeRetries = 10
-        private let resizeRetryDelay = DispatchTimeInterval.milliseconds(120)
         private var lastSent: (cols: Int, rows: Int)?
         /// The most recent grid the surface actually reported, recorded on EVERY
         /// resize before any throttle/dedup — the authoritative current size. Both
@@ -286,7 +278,6 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // viewer (web / phone) can take control of the pty size (juancode-1th.1).
             session.releaseGrid(owner: GridArbiter.localOwner)
             resizeWork?.cancel(); resizeWork = nil
-            resizeRetryWork?.cancel(); resizeRetryWork = nil
             cancel?(); cancel = nil
             streaming = false
             gsession = nil
@@ -364,34 +355,15 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             onGrid?(cols, rows)
             // Only cache the grid as sent once the pty actually adopts it. If the
             // session isn't running yet the resize is dropped; leaving `lastSent`
-            // unset means the next identical measurement isn't deduped away, and we
-            // also schedule an explicit retry since the surface won't re-fire once
-            // the size settles (juancode-uz6).
+            // unset means the next identical measurement isn't deduped away. The
+            // boot-time re-assert (slow CLI missing early SIGWINCHs) is now owned by
+            // the server: `Session.reapplyGridWhenReady` re-applies the desired grid
+            // once the TUI settles (juancode-1th.3), so no client-side retry needed.
             if session.resizeLocal(cols: cols, rows: rows) {
                 lastSent = (cols, rows)
-                resizeRetries = 0
-                resizeRetryWork?.cancel()
-                resizeRetryWork = nil
             } else {
                 lastSent = nil
-                scheduleResizeRetry()
             }
-        }
-
-        /// Re-assert the latest settled surface grid after a short delay, bounded so
-        /// a session that never starts isn't retried forever (its exit tears the pane
-        /// down anyway). Reads `lastSurfaceGrid` at fire time so it always chases the
-        /// current size, not a stale one captured when the retry was scheduled.
-        private func scheduleResizeRetry() {
-            guard resizeRetries < maxResizeRetries else { return }
-            resizeRetries += 1
-            resizeRetryWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, let g = self.lastSurfaceGrid else { return }
-                self.sendResize(cols: g.cols, rows: g.rows)
-            }
-            resizeRetryWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + resizeRetryDelay, execute: work)
         }
 
         /// Manual "recalculate geometry": re-measure the surface, then force a genuine
@@ -413,9 +385,9 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// real one a beat later, so the TUI observes a size change and fully
         /// re-lays-out even when the grid is unchanged (a same-size TIOCSWINSZ
         /// delivers no signal). Shared by the manual resync and the automatic
-        /// layout-transition settle. Mirrors `sendResize`'s adopt-or-retry: if the
-        /// pty isn't running yet the final size was dropped, so leave it un-cached
-        /// and schedule a retry rather than pretending it landed.
+        /// layout-transition settle. Like `sendResize`: if the pty isn't running yet
+        /// the final size was dropped, so leave it un-cached rather than pretending it
+        /// landed — the server's re-apply-on-settle covers the boot case (1th.3).
         private func nudge(cols: Int, rows: Int) {
             lastSent = nil
             session.resizeLocal(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
@@ -423,12 +395,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                 guard let self else { return }
                 if self.session.resizeLocal(cols: cols, rows: rows) {
                     self.lastSent = (cols, rows)
-                    self.resizeRetries = 0
-                    self.resizeRetryWork?.cancel()
-                    self.resizeRetryWork = nil
                 } else {
                     self.lastSent = nil
-                    self.scheduleResizeRetry()
                 }
             }
         }

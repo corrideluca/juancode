@@ -260,10 +260,6 @@ final class TerminalHostView: NSView {
 
 extension TerminalView: JuancodeTerminalResponder {}
 
-/// A one-shot flag shared into a `@Sendable` callback. Only ever touched on the
-/// main thread (inside `MainActor.assumeIsolated`), so the unchecked Sendable is safe.
-private final class OnceFlag: @unchecked Sendable { var done = false }
-
 /// Remembers the last on-screen terminal grid (cols×rows) so a newly-spawned CLI
 /// can boot already matching the visible terminal. Persisted in UserDefaults; read
 /// by `AppModel` when spawning/resuming a session. Falls back to a roomy default.
@@ -389,14 +385,12 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private var cancel: (() -> Void)?
         private var wheelMonitor: Any?
         private var resizeWork: DispatchWorkItem?
-        private var resyncWork: [DispatchWorkItem] = []
         /// Last (cols,rows) we pushed to the pty, so we never send a redundant
         /// SIGWINCH (which makes the agent's TUI repaint for no reason).
         private var lastSent: (cols: Int, rows: Int)?
         /// Latest grid size SwiftTerm computed (from `sizeChanged`). Cached as plain
-        /// ints so the boot resync can re-send it without touching the main-actor view.
+        /// ints so a reactivation nudge can re-send it without touching the main-actor view.
         private var lastGrid: (cols: Int, rows: Int)?
-        private var activityCancel: (() -> Void)?
         /// Observers that re-assert the grid when the app/window comes back to the front
         /// (activation / de-miniaturize) — a fullscreen / display / Space change can
         /// re-lay-out the window without routing a frame change through `sizeChanged`.
@@ -424,7 +418,6 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                     tv?.feed(byteArray: bytes[...])
                 }
             }
-            scheduleInitialResync()
             let session = self.session
             // A fullscreen / display / Space change, or coming back from a minimize or
             // app-switch, can re-lay-out the window without routing a frame change
@@ -439,23 +432,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                     MainActor.assumeIsolated { Self.nudgeResize(tv, session) }
                 })
             }
-            // Deterministic catch for a slow boot: the first time the CLI reports it's
-            // ready (idle/waiting for input) its SIGWINCH handler is certainly
-            // installed, so re-assert the real grid once — fixes a CLI that booted
-            // past the resync window still stuck at the spawn-time 80x24. The listener
-            // is `@Sendable` and the Coordinator isn't, so we capture only Sendable
-            // values (the session + the @MainActor view) and read the live grid there.
-            let once = OnceFlag()
-            activityCancel = session.onActivity { [weak tv] state, _ in
-                guard state == .idle || state == .waitingInput else { return }
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard !once.done, tv?.terminal != nil else { return }
-                        once.done = true
-                        Self.nudgeResize(tv, session)
-                    }
-                }
-            }
+            // The boot-time resync (slow CLI missing early SIGWINCHs) is now owned by
+            // the server: `Session.reapplyGridWhenReady` re-asserts the desired grid
+            // once the TUI settles (juancode-1th.3). This view only handles later
+            // window relayouts (the reactivation nudge above) and manual `forceResync`.
         }
 
         /// Nudge the pty to the view's live grid: send `rows-1` then the real `rows` a
@@ -540,23 +520,6 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             }
         }
 
-        private func scheduleInitialResync() {
-            // A freshly-spawned CLI starts at 80x24 and may install its SIGWINCH
-            // handler only after a slow boot (e.g. MCP servers loading for several
-            // seconds), missing every early resize and staying at 24 rows. So we
-            // re-assert the real grid across a long-ish window, forcing each send
-            // past the dedup — a redundant SIGWINCH at steady state is harmless.
-            for ms in [100, 400, 1000, 2000, 3500, 5000, 8000] {
-                let work = DispatchWorkItem { [weak self] in
-                    guard let self, let g = self.lastGrid else { return }
-                    self.session.resizeLocal(cols: g.cols, rows: g.rows)
-                    self.lastSent = g
-                }
-                resyncWork.append(work)
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms), execute: work)
-            }
-        }
-
         /// Push a size to the pty, skipping no-op repeats. Also remember it as the
         /// size to spawn the *next* CLI at, so a freshly-opened session boots already
         /// matching the on-screen terminal instead of the tiny 80x24 default (which a
@@ -577,8 +540,6 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
             resizeWork?.cancel(); resizeWork = nil
-            resyncWork.forEach { $0.cancel() }; resyncWork.removeAll()
-            activityCancel?(); activityCancel = nil
             cancel?()
             cancel = nil
         }

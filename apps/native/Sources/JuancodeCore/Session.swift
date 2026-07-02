@@ -111,6 +111,14 @@ public final class Session: @unchecked Sendable {
     /// two different-sized viewers can't flap it last-write-wins (juancode-1th.1).
     private let grid = GridArbiter()
 
+    /// The controlling client's most recent desired grid, seeded with the spawn
+    /// size and updated on every arbitrated resize. The server re-asserts it across
+    /// the boot window so a CLI that installs its SIGWINCH handler late (slow MCP
+    /// load) still lands at the right size — no client-side retry timers needed
+    /// (juancode-1th.3). Guarded by `lock`.
+    private var desiredCols = 0
+    private var desiredRows = 0
+
     /// Previous activity, tracked to fire the queue flush on the edge into idle
     /// (oracle-cj3 / juancode-r82). Guarded by `lock`.
     private var prevQueueActivity: SessionActivity?
@@ -255,6 +263,16 @@ public final class Session: @unchecked Sendable {
             }
         )
         lock.withLock { stopActivityTail = stop }
+        // Seed the desired grid with the spawn size and re-assert it once the TUI is
+        // up, so a slow-booting CLI that missed early SIGWINCHs still adopts it
+        // (juancode-1th.3) — the server-side replacement for per-client retry timers.
+        lock.withLock {
+            desiredCols = cols
+            desiredRows = rows
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.reapplyGridWhenReady()
+        }
     }
 
     /// Invoke and clear the activity-tail stop handle (idempotent).
@@ -324,6 +342,20 @@ public final class Session: @unchecked Sendable {
         static let maxAttempts = 3
         /// Rows of the bottom screen region treated as the input-box area.
         static let inputRows = 16
+    }
+
+    /// Tunables for the server-owned desired-grid re-apply (juancode-1th.3). Mirrors
+    /// the `GRID` block in `apps/server/src/session.ts`.
+    private enum GridReapply {
+        /// Re-apply the desired grid this many times across the boot window.
+        static let attempts = 3
+        /// Wait for the TUI to settle (stable frames) before each re-apply.
+        static let settleMaxMs = 8_000
+        static let settlePollMs = 200
+        /// Gap between the `rows-1` nudge and the real `rows` (a genuine size change).
+        static let nudgeMs = 60
+        /// Pause between re-apply attempts (lets the re-laid-out screen settle again).
+        static let gapMs = 500
     }
 
     /// Seed a fresh session with an initial prompt and **verify** it was actually
@@ -553,6 +585,14 @@ public final class Session: @unchecked Sendable {
     /// as-is, and the `resizeAck.denied` flag tells its tracker to stop retrying.
     public func resizeGrid(owner: String, cols: Int, rows: Int) -> (applied: Bool, denied: Bool) {
         guard grid.request(owner) else { return (applied: false, denied: true) }
+        // Remember the controlling owner's grid so the server can re-assert it if
+        // this resize raced the CLI's SIGWINCH-handler install (juancode-1th.3).
+        if cols > 0, rows > 0 {
+            lock.withLock {
+                desiredCols = cols
+                desiredRows = rows
+            }
+        }
         return (applied: resize(cols: cols, rows: rows), denied: false)
     }
 
@@ -570,6 +610,37 @@ public final class Session: @unchecked Sendable {
     /// `owner` isn't the current owner.
     public func releaseGrid(owner: String) {
         grid.release(owner)
+    }
+
+    /// Re-assert the desired grid across the boot window (juancode-1th.3). A CLI
+    /// that installs its SIGWINCH handler late (slow MCP load) misses the spawn-time
+    /// grid; we wait for the TUI to settle, then force a genuine SIGWINCH, a bounded
+    /// number of times. Each re-apply re-lays-out the screen, so the next
+    /// `waitForStableScreen` naturally spaces the attempts. Runs server-side so no
+    /// client needs its own retry timers.
+    private func reapplyGridWhenReady() async {
+        for _ in 0..<GridReapply.attempts {
+            await waitForStableScreen(maxMs: GridReapply.settleMaxMs, pollMs: GridReapply.settlePollMs)
+            guard isRunning else { return }
+            nudgeReapply()
+            try? await Task.sleep(for: .milliseconds(GridReapply.gapMs))
+            guard isRunning else { return }
+        }
+    }
+
+    /// Push the desired grid to the pty as a `rows-1` → `rows` pair: a genuine size
+    /// change forces a SIGWINCH the settled CLI can't miss, where re-sending the
+    /// same size can be a no-op. No-op until a desired grid is known / the pty is
+    /// live.
+    private func nudgeReapply() {
+        let (cols, rows) = lock.withLock { (desiredCols, desiredRows) }
+        guard isRunning, cols > 0, rows > 0 else { return }
+        _ = resize(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
+        let workQueue = self.workQueue
+        workQueue.asyncAfter(deadline: .now() + .milliseconds(GridReapply.nudgeMs)) { [weak self] in
+            guard let self, self.isRunning else { return }
+            _ = self.resize(cols: cols, rows: rows)
+        }
     }
 
     public func kill() {

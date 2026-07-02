@@ -194,9 +194,9 @@ class JuancodeSocket {
         if (this.inputBuffer.ack(msg.seq)) this.notifyInFlight();
         return;
       } else if (msg.type === "resizeAck") {
-        // Re-assert the grid if it didn't reach a live pty; not forwarded to UI.
-        const resend = this.resizeTracker.ack(msg);
-        if (resend) setTimeout(() => this.rawSend(resend.data), resend.delayMs);
+        // The server now owns re-applying a dropped grid (juancode-1th.3), so
+        // there's no client-side retry to run — we only still track the desired
+        // grid so `onopen` can re-assert it on reconnect. Swallow the ack.
         return;
       } else if (msg.type === "exit") {
         this.resizeTracker.forget(msg.sessionId);
@@ -254,13 +254,6 @@ class JuancodeSocket {
       this.queue.push(data);
       this.connect();
     }
-  }
-
-  /** Send a pre-serialized frame if the socket is open, else drop it. Used for a
-   * delayed resize retry: if the socket closed in the meantime, `onopen`'s
-   * `pending()` replay re-asserts the latest grid, so dropping here is safe. */
-  private rawSend(data: string): void {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(data);
   }
 
   /** Count of sent-but-unacknowledged keystrokes (for a subtle "unsent" hint). */

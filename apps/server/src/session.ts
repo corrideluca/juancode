@@ -71,6 +71,26 @@ const SEED = {
   inputRows: 16,
 } as const;
 
+/**
+ * Server-owned desired-grid re-apply (juancode-1th.3). A freshly-spawned CLI boots
+ * at the grid we passed `pty.spawn` but may install its SIGWINCH handler only after
+ * a slow boot (MCP servers loading for seconds), missing early resizes and staying
+ * at the wrong size. Rather than have every client paper over this with its own
+ * retry timers, the server re-asserts the desired grid a few times across the boot
+ * window — forcing a genuine SIGWINCH each time — until the settled CLI adopts it.
+ */
+const GRID = {
+  /** Re-apply the desired grid this many times across the boot window. */
+  reapplyAttempts: 3,
+  /** Wait for the TUI to settle (stable frames) before each re-apply. */
+  settleMaxMs: 8_000,
+  settlePollMs: 200,
+  /** Gap between the `rows-1` nudge and the real `rows` (a genuine size change). */
+  nudgeMs: 60,
+  /** Pause between re-apply attempts (lets the re-laid-out screen settle again). */
+  reapplyGapMs: 500,
+} as const;
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class Session {
@@ -94,6 +114,14 @@ export class Session {
    * two different-sized viewers can't flap it last-write-wins (juancode-1th.1).
    */
   private readonly grid = new GridArbiter();
+  /**
+   * The controlling client's most recent desired grid, seeded with the spawn size
+   * and updated on every arbitrated resize. The server re-asserts it across the
+   * boot window so a CLI that installs its SIGWINCH handler late still lands at the
+   * right size — no client-side retry timers needed (juancode-1th.3).
+   */
+  private desiredCols = 0;
+  private desiredRows = 0;
   /**
    * Tails this session's stream-json transcript purely to feed structured
    * activity pulses into {@link detector} (the preferred, wording-independent
@@ -189,6 +217,12 @@ export class Session {
     this.startTitleWatch();
     // Tail the transcript for structured activity pulses (see activityTail).
     this.activityTail.start();
+    // Seed the desired grid with the spawn size and re-assert it once the TUI is
+    // up, so a slow-booting CLI that missed early SIGWINCHs still adopts it
+    // (juancode-1th.3) — the server-side replacement for per-client retry timers.
+    this.desiredCols = cols;
+    this.desiredRows = rows;
+    void this.reapplyGridWhenReady();
   }
 
   /** Start a brand-new conversation. */
@@ -399,7 +433,46 @@ export class Session {
    */
   resizeGrid(owner: string, cols: number, rows: number): { applied: boolean; denied: boolean } {
     if (!this.grid.request(owner)) return { applied: false, denied: true };
+    // Remember the controlling owner's grid so the server can re-assert it if this
+    // resize raced the CLI's SIGWINCH-handler install (juancode-1th.3).
+    if (cols > 0 && rows > 0) {
+      this.desiredCols = cols;
+      this.desiredRows = rows;
+    }
     return { applied: this.resize(cols, rows), denied: false };
+  }
+
+  /**
+   * Re-assert the desired grid across the boot window (juancode-1th.3). A CLI that
+   * installs its SIGWINCH handler late (slow MCP load) misses the spawn-time grid;
+   * we wait for the TUI to settle, then force a genuine SIGWINCH, a bounded number
+   * of times. Each re-apply re-lays-out the screen, so the next {@link
+   * waitForStableScreen} naturally spaces the attempts. Runs server-side so no
+   * client needs its own retry timers.
+   */
+  private async reapplyGridWhenReady(): Promise<void> {
+    for (let i = 0; i < GRID.reapplyAttempts; i++) {
+      await this.waitForStableScreen(GRID.settleMaxMs, GRID.settlePollMs);
+      if (!this.isRunning) return;
+      this.nudgeReapply();
+      await sleep(GRID.reapplyGapMs);
+      if (!this.isRunning) return;
+    }
+  }
+
+  /**
+   * Push the desired grid to the pty as a `rows-1` → `rows` pair: a genuine size
+   * change forces a SIGWINCH the settled CLI can't miss, where re-sending the same
+   * size can be a no-op. No-op until a desired grid is known / the pty is live.
+   */
+  private nudgeReapply(): void {
+    const cols = this.desiredCols;
+    const rows = this.desiredRows;
+    if (!this.isRunning || cols <= 0 || rows <= 0) return;
+    this.resize(cols, rows > 2 ? rows - 1 : rows + 1);
+    setTimeout(() => {
+      if (this.isRunning) this.resize(cols, rows);
+    }, GRID.nudgeMs);
   }
 
   /**
