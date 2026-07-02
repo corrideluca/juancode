@@ -43,49 +43,6 @@ struct ResumableSession: Identifiable, Sendable {
     var id: String { cliSessionId }
 }
 
-enum GithubBoardPriority: String, Codable, CaseIterable, Identifiable, Sendable {
-    case high
-    case medium
-    case low
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .high: "High"
-        case .medium: "Medium"
-        case .low: "Low"
-        }
-    }
-
-    var rank: Int {
-        switch self {
-        case .high: 0
-        case .medium: 1
-        case .low: 2
-        }
-    }
-}
-
-struct GithubBoardLink: Identifiable, Codable, Sendable, Equatable {
-    var id: String
-    var title: String
-    var url: String
-    var priority: GithubBoardPriority
-    var createdAt: Int
-    var updatedAt: Int
-
-    init(id: String = UUID().uuidString, title: String, url: String,
-         priority: GithubBoardPriority, createdAt: Int, updatedAt: Int) {
-        self.id = id
-        self.title = title
-        self.url = url
-        self.priority = priority
-        self.createdAt = createdAt
-        self.updatedAt = updatedAt
-    }
-}
-
 /// Observable view-model bridging the SwiftUI shell to the shared `AppState`. The
 /// local UI is an in-process subscriber to the same `SessionRegistry` the
 /// embedded server drives — there is no WS hop for the local view.
@@ -158,8 +115,10 @@ final class AppModel {
     /// through `addSessionTemplate`/`updateSessionTemplate`/`deleteSessionTemplate`,
     /// which persist on every change. The launcher sheet binds to this array.
     var sessionTemplates: [SessionTemplate] = []
-    /// Saved GitHub board links, ordered by priority in the panel.
-    var githubBoards: [GithubBoardLink] = []
+    /// Saved GitHub project board links, loaded from `UserDefaults`.
+    var githubBoards: [GithubProjectBoard] = []
+    var githubBoardItems: [String: GithubProjectItemsResult] = [:]
+    var githubBoardLoading: Set<String> = []
     /// Controls the session-template launcher/manager sheet.
     var showingSessionTemplates = false
     var errorMessage: String?
@@ -1644,10 +1603,10 @@ final class AppModel {
 
     private static let githubBoardsDefaultsKey = "juancode.githubBoards.v1"
 
-    var githubBoardsByPriority: [GithubBoardLink] {
+    var githubBoardsSorted: [GithubProjectBoard] {
         githubBoards.sorted {
-            if $0.priority.rank != $1.priority.rank { return $0.priority.rank < $1.priority.rank }
-            return $0.updatedAt > $1.updatedAt
+            if $0.owner != $1.owner { return $0.owner.localizedCompare($1.owner) == .orderedAscending }
+            return $0.number < $1.number
         }
     }
 
@@ -1661,34 +1620,87 @@ final class AppModel {
 
     private func restoreGithubBoards() {
         guard let data = UserDefaults.standard.data(forKey: Self.githubBoardsDefaultsKey),
-              let list = try? JSONDecoder().decode([GithubBoardLink].self, from: data) else { return }
+              let list = try? JSONDecoder().decode([GithubProjectBoard].self, from: data) else { return }
         githubBoards = list
     }
 
     @discardableResult
-    func addGithubBoard(title: String, url: String, priority: GithubBoardPriority) -> GithubBoardLink {
+    func addGithubBoard(url: String) -> GithubProjectBoard? {
         let now = nowMs()
-        let board = GithubBoardLink(
-            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-            url: url.trimmingCharacters(in: .whitespacesAndNewlines),
-            priority: priority,
-            createdAt: now,
-            updatedAt: now)
+        guard let board = parseGithubProjectURL(url, now: now) else { return nil }
+        if let existing = githubBoards.first(where: { $0.owner == board.owner && $0.number == board.number }) {
+            return existing
+        }
         githubBoards.append(board)
         persistGithubBoards()
+        refreshGithubBoard(board.id)
         return board
-    }
-
-    func updateGithubBoardPriority(_ id: String, priority: GithubBoardPriority) {
-        guard let i = githubBoards.firstIndex(where: { $0.id == id }) else { return }
-        githubBoards[i].priority = priority
-        githubBoards[i].updatedAt = nowMs()
-        persistGithubBoards()
     }
 
     func deleteGithubBoard(_ id: String) {
         githubBoards.removeAll { $0.id == id }
+        githubBoardItems[id] = nil
         persistGithubBoards()
+    }
+
+    func refreshGithubBoards() {
+        for board in githubBoards { refreshGithubBoard(board.id) }
+    }
+
+    func refreshGithubBoard(_ id: String) {
+        guard let board = githubBoards.first(where: { $0.id == id }),
+              !githubBoardLoading.contains(id) else { return }
+        githubBoardLoading.insert(id)
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                await getAssignedGithubProjectIssues(board, cwd: Config.defaultCwd)
+            }.value
+            githubBoardItems[id] = result
+            githubBoardLoading.remove(id)
+        }
+    }
+
+    func createGithubBoardDraftIssue(boardId: String, title: String, body: String) {
+        guard let board = githubBoards.first(where: { $0.id == boardId }) else { return }
+        Task {
+            let ok = await Task.detached(priority: .utility) {
+                await createGithubProjectDraftIssue(board, title: title, body: body, cwd: Config.defaultCwd)
+            }.value != nil
+            if ok { refreshGithubBoard(boardId) }
+            else { errorMessage = "Failed to create GitHub Project draft issue" }
+        }
+    }
+
+    func githubIssueFolder(_ issue: GithubProjectIssue) -> String {
+        let repoName = issue.repository.split(separator: "/").last.map(String.init) ?? ""
+        if let match = trackableFolders.first(where: { ($0 as NSString).lastPathComponent == repoName }) {
+            return match
+        }
+        return trackableFolders.first ?? Config.defaultCwd
+    }
+
+    func startGithubIssueSession(_ issue: GithubProjectIssue, provider: ProviderId, cwd: String) {
+        let prompt = githubIssuePrompt(issue)
+        Task {
+            await create(provider: provider, cwd: cwd, skipPermissions: true,
+                         isolateWorktree: false, initialInput: prompt)
+        }
+    }
+
+    private func githubIssuePrompt(_ issue: GithubProjectIssue) -> String {
+        var parts: [String] = []
+        if let n = issue.number {
+            parts.append("Please work on GitHub issue #\(n): \(issue.title)")
+        } else {
+            parts.append("Please work on this GitHub issue: \(issue.title)")
+        }
+        if !issue.repository.isEmpty { parts.append("Repository: \(issue.repository)") }
+        parts.append("URL: \(issue.url)")
+        if !issue.priority.isEmpty { parts.append("Priority: \(issue.priority)") }
+        if !issue.status.isEmpty { parts.append("Status: \(issue.status)") }
+        let body = issue.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !body.isEmpty { parts.append("\nDescription:\n\(body)") }
+        return parts.joined(separator: "\n")
     }
 
     /// Spawn `count` sessions from a template. Each is a normal `create` — same

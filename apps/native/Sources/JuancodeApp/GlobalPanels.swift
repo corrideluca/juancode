@@ -367,27 +367,22 @@ private struct TrackedPrRow: View {
 struct GithubBoardsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var title = ""
     @State private var url = ""
-    @State private var priority: GithubBoardPriority = .high
+    @State private var selectedIssue: GithubProjectIssue?
+    @State private var createBoardId: String?
+    @State private var draftTitle = ""
+    @State private var draftBody = ""
 
-    private var trimmedTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var trimmedUrl: String { url.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var validGithubUrl: URL? {
-        guard let u = URL(string: trimmedUrl),
-              let scheme = u.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              let host = u.host?.lowercased(), host == "github.com" || host.hasSuffix(".github.com") else {
-            return nil
-        }
-        return u
-    }
-    private var canAdd: Bool { !trimmedTitle.isEmpty && validGithubUrl != nil }
+    private var canAdd: Bool { parseGithubProjectURL(trimmedUrl, now: 0) != nil }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("GitHub Boards").font(.title3).bold()
                 Spacer()
+                Button { model.refreshGithubBoards() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Refresh boards").clickCursor()
                 Button("Done") { dismiss() }.clickCursor()
             }
             .padding()
@@ -400,50 +395,55 @@ struct GithubBoardsSheet: View {
                     Image(systemName: "rectangle.grid.2x2").font(.largeTitle).foregroundStyle(.secondary)
                     Text("No GitHub board links yet.")
                         .foregroundStyle(.secondary).font(.system(size: 13))
-                    Text("Add GitHub Projects or board URLs above, then tag each one by priority.")
+                    Text("Add a GitHub Project URL above to see open issues assigned to you.")
                         .font(.system(size: 11)).foregroundStyle(.tertiary)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(model.githubBoardsByPriority) { board in
-                            GithubBoardRow(board: board)
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(model.githubBoardsSorted) { board in
+                            GithubBoardSection(
+                                board: board,
+                                result: model.githubBoardItems[board.id],
+                                loading: model.githubBoardLoading.contains(board.id),
+                                selectedIssue: $selectedIssue,
+                                createBoardId: $createBoardId)
                             Divider()
                         }
                     }
                 }
             }
         }
-        .frame(width: 660, height: 500)
+        .frame(width: 780, height: 560)
+        .onAppear { model.refreshGithubBoards() }
+        .sheet(item: $selectedIssue) { issue in
+            GithubProjectIssueDetail(issue: issue)
+        }
+        .sheet(item: Binding(
+            get: { createBoardId.flatMap { id in model.githubBoards.first(where: { $0.id == id }) } },
+            set: { if $0 == nil { createBoardId = nil } }
+        )) { board in
+            createIssueSheet(board)
+        }
     }
 
     private var addBoardForm: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                TextField("Board name", text: $title)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
-                    .frame(width: 190)
-                    .onSubmit(addBoard)
                 TextField("GitHub board URL", text: $url)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12))
                     .onSubmit(addBoard)
-                Picker("Priority", selection: $priority) {
-                    ForEach(GithubBoardPriority.allCases) { p in
-                        Text(p.label).tag(p)
-                    }
+                Button { addBoard() } label: {
+                    Label("Add Board", systemImage: "plus")
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 190)
-                Button("Add", action: addBoard)
                     .disabled(!canAdd)
                     .clickCursor()
             }
-            if !trimmedUrl.isEmpty && validGithubUrl == nil {
-                Text("Use a valid github.com URL.")
+            if !trimmedUrl.isEmpty && !canAdd {
+                Text("Use a GitHub org project URL like https://github.com/orgs/Good-Authority/projects/1.")
                     .font(.system(size: 11)).foregroundStyle(.orange)
             }
         }
@@ -452,74 +452,239 @@ struct GithubBoardsSheet: View {
 
     private func addBoard() {
         guard canAdd else { return }
-        model.addGithubBoard(title: trimmedTitle, url: trimmedUrl, priority: priority)
-        title = ""
+        _ = model.addGithubBoard(url: trimmedUrl)
         url = ""
-        priority = .high
+    }
+
+    private func createIssueSheet(_ board: GithubProjectBoard) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Create Issue").font(.title3).bold()
+                Spacer()
+                Button("Cancel") { createBoardId = nil }.clickCursor()
+            }
+            Text(board.title)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            TextField("Title", text: $draftTitle)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(createDraftIssue)
+            TextEditor(text: $draftBody)
+                .font(.system(size: 12))
+                .frame(minHeight: 180)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.appHairline(0.2)))
+            HStack {
+                Spacer()
+                Button("Create Draft Issue", action: createDraftIssue)
+                    .disabled(draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .clickCursor()
+            }
+        }
+        .padding()
+        .frame(width: 520, height: 360)
+    }
+
+    private func createDraftIssue() {
+        guard let id = createBoardId else { return }
+        let title = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        model.createGithubBoardDraftIssue(boardId: id, title: title, body: draftBody)
+        draftTitle = ""
+        draftBody = ""
+        createBoardId = nil
     }
 }
 
-private struct GithubBoardRow: View {
+private struct GithubBoardSection: View {
     @Environment(AppModel.self) private var model
-    let board: GithubBoardLink
+    let board: GithubProjectBoard
+    let result: GithubProjectItemsResult?
+    let loading: Bool
+    @Binding var selectedIssue: GithubProjectIssue?
+    @Binding var createBoardId: String?
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "rectangle.grid.2x2")
-                .font(.system(size: 13))
-                .foregroundStyle(priorityColor(board.priority))
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Text(board.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                    Text(board.priority.label)
-                        .font(.system(size: 9, weight: .semibold))
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(priorityColor(board.priority).opacity(0.18))
-                        .foregroundStyle(priorityColor(board.priority))
-                        .clipShape(Capsule())
-                    Spacer(minLength: 8)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.grid.2x2")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(board.title).font(.system(size: 13, weight: .semibold))
+                    Text(board.url).font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
-                Text(board.url)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Spacer()
+                if loading { ProgressView().controlSize(.small) }
+                Button { createBoardId = board.id } label: { Image(systemName: "plus.circle") }
+                    .buttonStyle(.borderless).help("Create draft issue in this board").clickCursor()
+                Button { model.refreshGithubBoard(board.id) } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Refresh").clickCursor()
+                Button {
+                    if let u = URL(string: board.url) { NSWorkspace.shared.open(u) }
+                } label: { Image(systemName: "safari") }
+                    .buttonStyle(.borderless).help("Open board").clickCursor()
+                Button(role: .destructive) { model.deleteGithubBoard(board.id) } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless).help("Remove board").clickCursor()
             }
-            Picker("Priority", selection: Binding(
-                get: { board.priority },
-                set: { model.updateGithubBoardPriority(board.id, priority: $0) }
-            )) {
-                ForEach(GithubBoardPriority.allCases) { p in
-                    Text(p.label).tag(p)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            let issues = result?.issues ?? []
+            if let result, !result.available {
+                Text(result.error ?? "Could not load GitHub Project items.")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+                    .padding(.horizontal, 40).padding(.bottom, 10)
+            } else if !loading && issues.isEmpty {
+                Text("No open issue items assigned to you.")
+                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 40).padding(.bottom, 10)
+            } else {
+                ForEach(sortedIssues(issues)) { issue in
+                    GithubProjectIssueRow(issue: issue) { selectedIssue = issue }
                 }
             }
-            .labelsHidden()
-            .frame(width: 120)
-            Button("Open") {
-                if let u = URL(string: board.url) { NSWorkspace.shared.open(u) }
-            }
-            .buttonStyle(.borderless)
-            .font(.system(size: 11))
-            .clickCursor()
-            Button("Delete", role: .destructive) {
-                model.deleteGithubBoard(board.id)
-            }
-            .buttonStyle(.borderless)
-            .font(.system(size: 11))
-            .clickCursor()
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    private func sortedIssues(_ issues: [GithubProjectIssue]) -> [GithubProjectIssue] {
+        issues.sorted {
+            let pa = priorityRank($0.priority.isEmpty ? labelsPriority($0.labels) : $0.priority)
+            let pb = priorityRank($1.priority.isEmpty ? labelsPriority($1.labels) : $1.priority)
+            if pa != pb { return pa < pb }
+            return $0.title.localizedCompare($1.title) == .orderedAscending
+        }
     }
 }
 
-private func priorityColor(_ priority: GithubBoardPriority) -> Color {
-    switch priority {
-    case .high: .red
-    case .medium: .orange
-    case .low: .secondary
+private struct GithubProjectIssueRow: View {
+    let issue: GithubProjectIssue
+    let select: () -> Void
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 10) {
+                Text(priorityDisplay(issue))
+                    .font(.system(size: 10, weight: .semibold).monospaced())
+                    .frame(width: 26)
+                    .foregroundStyle(priorityColor(priorityDisplay(issue)))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(issue.title)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        if let n = issue.number { Text("#\(n)") }
+                        if !issue.repository.isEmpty { Text(issue.repository) }
+                        if !issue.status.isEmpty { Text(issue.status) }
+                    }
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 40).padding(.vertical, 7)
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+    }
+}
+
+private struct GithubProjectIssueDetail: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let issue: GithubProjectIssue
+    @State private var cwd = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(issue.title).font(.title3).bold()
+                    HStack(spacing: 8) {
+                        if let n = issue.number { Text("#\(n)") }
+                        if !issue.repository.isEmpty { Text(issue.repository) }
+                        if !priorityDisplay(issue).isEmpty { Text(priorityDisplay(issue)) }
+                        if !issue.status.isEmpty { Text(issue.status) }
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Close") { dismiss() }.clickCursor()
+            }
+            .padding()
+            Divider()
+            ScrollView {
+                Text(issue.body.isEmpty ? "No description." : issue.body)
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            Divider()
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(model.trackableFolders, id: \.self) { folder in
+                        Button((folder as NSString).lastPathComponent) { cwd = folder }
+                    }
+                } label: {
+                    Text((cwd as NSString).lastPathComponent.isEmpty ? "Folder…" : (cwd as NSString).lastPathComponent)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                }
+                .frame(width: 170)
+                .help(cwd)
+                Spacer()
+                Button("Open in GitHub") {
+                    if let u = URL(string: issue.url) { NSWorkspace.shared.open(u) }
+                }
+                .clickCursor()
+                Button("Start Claude") {
+                    model.startGithubIssueSession(issue, provider: .claude, cwd: cwd)
+                    dismiss()
+                }
+                .disabled(cwd.isEmpty)
+                .clickCursor()
+                Button("Start Codex") {
+                    model.startGithubIssueSession(issue, provider: .codex, cwd: cwd)
+                    dismiss()
+                }
+                .disabled(cwd.isEmpty)
+                .clickCursor()
+            }
+            .padding()
+        }
+        .frame(width: 700, height: 560)
+        .onAppear { if cwd.isEmpty { cwd = model.githubIssueFolder(issue) } }
+    }
+}
+
+private func labelsPriority(_ labels: [String]) -> String {
+    labels.first { $0.range(of: #"^p[0-9]+$"#, options: [.regularExpression, .caseInsensitive]) != nil } ?? ""
+}
+
+private func priorityDisplay(_ issue: GithubProjectIssue) -> String {
+    issue.priority.isEmpty ? labelsPriority(issue.labels).uppercased() : issue.priority
+}
+
+private func priorityRank(_ priority: String) -> Int {
+    let p = priority.lowercased()
+    if p == "p0" || p.contains("urgent") { return 0 }
+    if p == "p1" || p.contains("high") { return 1 }
+    if p == "p2" || p.contains("medium") { return 2 }
+    if p == "p3" || p.contains("low") { return 3 }
+    return 9
+}
+
+private func priorityColor(_ priority: String) -> Color {
+    switch priorityRank(priority) {
+    case 0, 1: .red
+    case 2: .orange
+    case 3: .secondary
+    default: .secondary
     }
 }
 
