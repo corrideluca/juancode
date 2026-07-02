@@ -374,6 +374,12 @@ export type ServerMessage =
    * e.g. the resize raced session spawn). A client that sees `applied: false` — or
    * an ack whose grid differs from its current desired size — re-sends its latest
    * grid so the CLI never stays stranded. Advertised via the `resizeAck` capability.
+   *
+   * `denied` is true when another client owns the session's shared grid
+   * (juancode-1th.1): the resize was intentionally NOT applied and re-sending it
+   * is futile, so the client stops retrying and renders the pty's actual grid
+   * as-is. Distinct from a plain `applied: false` (pty not yet running), which the
+   * client DOES retry. Omitted/false for editor/terminal ptys and owning clients.
    */
   | {
       type: "resizeAck";
@@ -382,6 +388,7 @@ export type ServerMessage =
       cols: number;
       rows: number;
       applied: boolean;
+      denied?: boolean;
     }
   | { type: "exit"; sessionId: string; exitCode: number | null }
   /**

@@ -89,6 +89,10 @@ public final class Session: @unchecked Sendable {
     private let workQueue: DispatchQueue
     private var detector: ActivityDetector!
 
+    /// Arbitrates which client controls this session's single shared pty grid, so
+    /// two different-sized viewers can't flap it last-write-wins (juancode-1th.1).
+    private let grid = GridArbiter()
+
     /// Previous activity, tracked to fire the queue flush on the edge into idle
     /// (oracle-cj3 / juancode-r82). Guarded by `lock`.
     private var prevQueueActivity: SessionActivity?
@@ -492,6 +496,33 @@ public final class Session: @unchecked Sendable {
         let applied = isRunning ? (proc?.resize(cols: cols, rows: rows) ?? false) : false
         detector.resize(cols: cols, rows: rows)
         return applied
+    }
+
+    /// Arbitrated grid resize for a specific client (juancode-1th.1). Only the
+    /// *controlling* owner may write the shared pty grid; a non-owner's request is
+    /// denied so the CLI TUI never flaps between two viewers' sizes. `applied` is
+    /// whether the grid reached a live pty (as `resize`); `denied` is true when
+    /// another client owns the grid — the caller renders the pty's actual grid
+    /// as-is, and the `resizeAck.denied` flag tells its tracker to stop retrying.
+    public func resizeGrid(owner: String, cols: Int, rows: Int) -> (applied: Bool, denied: Bool) {
+        guard grid.request(owner) else { return (applied: false, denied: true) }
+        return (applied: resize(cols: cols, rows: rows), denied: false)
+    }
+
+    /// Grid resize from the in-process local view (the native app's own terminal),
+    /// which preempts remote viewers per the "native is the primary surface"
+    /// policy (juancode-1th.1). Returns whether the grid reached a live pty.
+    @discardableResult
+    public func resizeLocal(cols: Int, rows: Int) -> Bool {
+        resizeGrid(owner: GridArbiter.localOwner, cols: cols, rows: rows).applied
+    }
+
+    /// Release this session's grid ownership held by `owner` — its client
+    /// disconnected, or (for the local view) its terminal was torn down — so the
+    /// next client's resize can take over the grid (juancode-1th.1). No-op if
+    /// `owner` isn't the current owner.
+    public func releaseGrid(owner: String) {
+        grid.release(owner)
     }
 
     public func kill() {

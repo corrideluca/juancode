@@ -36,6 +36,11 @@ final class WebSocketConnection: @unchecked Sendable {
     /// Enqueue a server message for the writer task (thread-safe).
     let send: @Sendable (ServerMessage) -> Void
 
+    /// Stable id for this connection, used as its grid-ownership token so a
+    /// session's shared pty grid has a single controlling client instead of
+    /// flapping last-write-wins between viewers (juancode-1th.1).
+    private let clientId = UUID().uuidString
+
     private let lock = NSLock()
     private var subscriptions: [String: () -> Void] = [:]
     private var activityWatchers: [() -> Void] = []
@@ -75,6 +80,10 @@ final class WebSocketConnection: @unchecked Sendable {
                 trackedPrsUnsub = nil
                 return r
             }
+        // Release any session grids this client controlled so ownership falls to
+        // the next active viewer's last-known grid (juancode-1th.1). Cheap no-op
+        // for sessions it didn't own.
+        for s in state.registry.all() { s.releaseGrid(owner: clientId) }
         for c in subs { c() }
         for w in watchers { w() }
         for q in queues { q() }
@@ -155,6 +164,9 @@ final class WebSocketConnection: @unchecked Sendable {
                     worktreePath: worktreePath
                 )
                 if let initialInput, !initialInput.isEmpty { session.autoSubmit(initialInput) }
+                // The creating client controls the grid it just spawned the
+                // session at, so claim ownership up front (juancode-1th.1).
+                _ = session.resizeGrid(owner: clientId, cols: cols, rows: rows)
                 send(.created(session: session.meta))
                 subscribe(session.id)
                 send(.attached(sessionId: session.id, scrollback: "", session: session.meta))
@@ -164,7 +176,10 @@ final class WebSocketConnection: @unchecked Sendable {
 
         case let .attach(sessionId, cols, rows):
             if let live = state.registry.get(sessionId) {
-                live.resize(cols: cols, rows: rows)
+                // Arbitrated: a bare attach from a secondary viewer must NOT
+                // resize the pty — only the controlling owner's grid takes
+                // (juancode-1th.1).
+                _ = live.resizeGrid(owner: clientId, cols: cols, rows: rows)
                 subscribe(sessionId)
                 send(.attached(sessionId: sessionId,
                                scrollback: String(decoding: live.getScrollback(), as: UTF8.self),
@@ -286,13 +301,23 @@ final class WebSocketConnection: @unchecked Sendable {
             if let seq { send(.inputAck(sessionId: sessionId, seq: seq)) }
 
         case let .resize(sessionId, cols, rows, seq):
-            // `resize` returns whether the grid reached a live pty; a resize that
-            // arrives before the pty is running is dropped. Ack that outcome so a
-            // sequenced client can re-assert instead of trusting a grid that never
-            // landed (juancode-uz6). No pty at all → not applied.
-            let applied = resolvePty(sessionId)?.resize(cols: cols, rows: rows) ?? false
+            // Sessions arbitrate the shared grid per client (juancode-1th.1): a
+            // non-owner's resize is `denied` and left un-applied so the CLI TUI
+            // can't flap between two viewers' sizes. Ephemeral editor/terminal
+            // ptys are tab-scoped (single owner), so they resize unarbitrated.
+            // Either way `applied` reports whether the grid reached a live pty — a
+            // resize that races session spawn is dropped (applied:false, not
+            // denied), so a sequenced client re-asserts it (juancode-uz6).
+            let applied: Bool
+            var denied = false
+            if let session = state.registry.get(sessionId) {
+                (applied, denied) = session.resizeGrid(owner: clientId, cols: cols, rows: rows)
+            } else {
+                applied = state.ephemeral.get(sessionId)?.resize(cols: cols, rows: rows) ?? false
+            }
             if let seq {
-                send(.resizeAck(sessionId: sessionId, seq: seq, cols: cols, rows: rows, applied: applied))
+                send(.resizeAck(sessionId: sessionId, seq: seq, cols: cols, rows: rows,
+                                applied: applied, denied: denied))
             }
 
         case let .kill(sessionId):

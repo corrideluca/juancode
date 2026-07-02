@@ -4,8 +4,14 @@ import { ResizeAckTracker } from "./resizeAckTracker.ts";
 const resize = (sessionId: string, cols: number, rows: number) =>
   ({ type: "resize", sessionId, cols, rows }) as const;
 
-const ack = (sessionId: string, seq: number, cols: number, rows: number, applied: boolean) =>
-  ({ type: "resizeAck", sessionId, seq, cols, rows, applied }) as const;
+const ack = (
+  sessionId: string,
+  seq: number,
+  cols: number,
+  rows: number,
+  applied: boolean,
+  denied = false,
+) => ({ type: "resizeAck", sessionId, seq, cols, rows, applied, denied }) as const;
 
 describe("ResizeAckTracker", () => {
   it("assigns a monotonic seq and stamps it into the frame", () => {
@@ -49,6 +55,15 @@ describe("ResizeAckTracker", () => {
     expect(frame).toMatchObject({ type: "resize", sessionId: "s1", cols: 80, rows: 24 });
     // The retry carries a fresh seq so its own ack matches.
     expect(frame.seq).toBeGreaterThan(a.seq);
+  });
+
+  it("stops retrying when the resize is denied (another client owns the grid)", () => {
+    const t = new ResizeAckTracker();
+    const a = t.track(resize("s1", 80, 24));
+    // A denied ack: re-sending the same grid would just be denied again, so the
+    // tracker must NOT ask for a resend (no hot retry loop) — unlike a plain
+    // applied:false, which it would retry.
+    expect(t.ack(ack("s1", a.seq, 80, 24, false, true))).toBeNull();
   });
 
   it("ignores a stale ack for a superseded resize", () => {

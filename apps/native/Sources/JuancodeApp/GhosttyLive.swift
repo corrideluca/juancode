@@ -278,6 +278,9 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         func terminalDidDetachSurface() {}
 
         func detach() {
+            // This local view is going away — release the shared grid so a remote
+            // viewer (web / phone) can take control of the pty size (juancode-1th.1).
+            session.releaseGrid(owner: GridArbiter.localOwner)
             resizeWork?.cancel(); resizeWork = nil
             resizeRetryWork?.cancel(); resizeRetryWork = nil
             cancel?(); cancel = nil
@@ -332,7 +335,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // unset means the next identical measurement isn't deduped away, and we
             // also schedule an explicit retry since the surface won't re-fire once
             // the size settles (juancode-uz6).
-            if session.resize(cols: cols, rows: rows) {
+            if session.resizeLocal(cols: cols, rows: rows) {
                 lastSent = (cols, rows)
                 resizeRetries = 0
                 resizeRetryWork?.cancel()
@@ -373,11 +376,11 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             guard let grid = lastSurfaceGrid ?? lastSent, grid.cols > 0, grid.rows > 0 else { return }
             let cols = grid.cols, rows = grid.rows
             lastSent = nil
-            session.resize(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
+            session.resizeLocal(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
                 guard let self else { return }
                 self.lastSent = (cols, rows)
-                self.session.resize(cols: cols, rows: rows)
+                self.session.resizeLocal(cols: cols, rows: rows)
             }
         }
 

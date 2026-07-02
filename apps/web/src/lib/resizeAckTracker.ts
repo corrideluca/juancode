@@ -60,6 +60,11 @@ export class ResizeAckTracker {
     // ack (for an obsolete grid) tells us nothing about the current desire.
     if (!d || msg.seq !== d.seq) return null;
     if (msg.applied && msg.cols === d.cols && msg.rows === d.rows) return null; // landed
+    // Denied: another client owns the session's shared grid (juancode-1th.1).
+    // Re-sending the same grid would just be denied again — a hot retry loop — so
+    // give up and render the pty's actual grid as-is. Ownership can still change
+    // (the owner disconnects), and the next real resize / a reconnect re-asserts.
+    if (msg.denied) return null;
     if (d.retries >= MAX_RETRIES) return null; // give up; `exit` will surface a dead pty
     d.retries += 1;
     d.seq = ++this.seq;

@@ -186,9 +186,12 @@ public enum ServerMessage: Sendable {
     /// Acknowledgement that the server processed a `resize` carrying a `seq`
     /// (juancode-uz6). `cols`/`rows` echo the requested grid; `applied` is true only
     /// when the grid reached a live pty (false when it wasn't running yet). The
-    /// client re-asserts its latest grid on `applied: false`. Only sent when the
+    /// client re-asserts its latest grid on `applied: false`. `denied` is true when
+    /// another client owns the session's shared grid (juancode-1th.1): the resize
+    /// was intentionally NOT applied and re-sending it is futile, so the client
+    /// stops retrying and renders the pty's actual grid as-is. Only sent when the
     /// resize carried a seq.
-    case resizeAck(sessionId: String, seq: Int, cols: Int, rows: Int, applied: Bool)
+    case resizeAck(sessionId: String, seq: Int, cols: Int, rows: Int, applied: Bool, denied: Bool)
     case exit(sessionId: String, exitCode: Int?)
     case activity(sessionId: String, state: SessionActivity, notify: Bool)
     /// A session's current pending message queue (oracle-cj3 / juancode-r82) — sent
@@ -246,8 +249,8 @@ extension ServerMessage: Encodable {
         case protocolVersion, capabilities
         // Input acknowledgement (juancode-1u3).
         case seq
-        // Resize acknowledgement (juancode-uz6).
-        case cols, rows, applied
+        // Resize acknowledgement (juancode-uz6) + grid-ownership deny (juancode-1th.1).
+        case cols, rows, applied, denied
         // Tracked-PR registry (juancode-bt2).
         case tracked, trackedId, prNumber, notification
         // Per-session message queue (oracle-cj3 / juancode-r82).
@@ -277,13 +280,14 @@ extension ServerMessage: Encodable {
             try c.encode("inputAck", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(seq, forKey: .seq)
-        case let .resizeAck(sessionId, seq, cols, rows, applied):
+        case let .resizeAck(sessionId, seq, cols, rows, applied, denied):
             try c.encode("resizeAck", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(seq, forKey: .seq)
             try c.encode(cols, forKey: .cols)
             try c.encode(rows, forKey: .rows)
             try c.encode(applied, forKey: .applied)
+            try c.encode(denied, forKey: .denied)
         case let .exit(sessionId, exitCode):
             try c.encode("exit", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)

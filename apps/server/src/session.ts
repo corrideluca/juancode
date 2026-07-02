@@ -11,6 +11,7 @@ import type { SpawnOptions } from "./providers.ts";
 import { deriveSessionTitle } from "./sessionTitle.ts";
 import { deriveSessionUsage } from "./sessionUsage.ts";
 import { ActivityDetector } from "./activityDetector.ts";
+import { GridArbiter } from "./gridArbiter.ts";
 import { notificationGate } from "./notificationGate.ts";
 import { messageQueue } from "./messageQueue.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
@@ -88,6 +89,11 @@ export class Session {
   /** True while {@link flushQueue} is mid-delivery, so edges don't overlap it. */
   private flushingQueue = false;
   private readonly detector: ActivityDetector;
+  /**
+   * Arbitrates which client controls this session's single shared pty grid, so
+   * two different-sized viewers can't flap it last-write-wins (juancode-1th.1).
+   */
+  private readonly grid = new GridArbiter();
   /**
    * Tails this session's stream-json transcript purely to feed structured
    * activity pulses into {@link detector} (the preferred, wording-independent
@@ -381,6 +387,28 @@ export class Session {
     if (applied) this.proc.resize(cols, rows);
     if (cols > 0 && rows > 0) this.detector.resize(cols, rows);
     return applied;
+  }
+
+  /**
+   * Arbitrated grid resize for a specific client (juancode-1th.1). Only the
+   * *controlling* owner may write the shared pty grid; a non-owner's request is
+   * denied so the CLI TUI never flaps between two viewers' sizes. `applied` is
+   * whether the grid reached a live pty (as {@link resize}); `denied` is true when
+   * another client owns the grid — the caller should render the pty's actual grid
+   * as-is, and the `resizeAck.denied` flag tells its tracker to stop retrying.
+   */
+  resizeGrid(owner: string, cols: number, rows: number): { applied: boolean; denied: boolean } {
+    if (!this.grid.request(owner)) return { applied: false, denied: true };
+    return { applied: this.resize(cols, rows), denied: false };
+  }
+
+  /**
+   * Release this session's grid ownership held by `owner` — its client
+   * disconnected (or its view was torn down) — so the next client's resize can
+   * take over the grid (juancode-1th.1). No-op if `owner` isn't the current owner.
+   */
+  releaseGrid(owner: string): void {
+    this.grid.release(owner);
   }
 
   kill(): void {

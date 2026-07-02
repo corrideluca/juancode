@@ -128,7 +128,8 @@ final class WireProtocolTests: XCTestCase {
     }
 
     func testEncodesResizeAck() throws {
-        let msg = ServerMessage.resizeAck(sessionId: "s-1", seq: 9, cols: 100, rows: 30, applied: false)
+        let msg = ServerMessage.resizeAck(sessionId: "s-1", seq: 9, cols: 100, rows: 30,
+                                          applied: false, denied: false)
         let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
         XCTAssertEqual(obj?["type"] as? String, "resizeAck")
         XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
@@ -136,6 +137,17 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(obj?["cols"] as? Int, 100)
         XCTAssertEqual(obj?["rows"] as? Int, 30)
         XCTAssertEqual(obj?["applied"] as? Bool, false)
+        XCTAssertEqual(obj?["denied"] as? Bool, false)
+    }
+
+    func testEncodesResizeAckDenied() throws {
+        // A resize denied because another client owns the shared grid
+        // (juancode-1th.1): the client reads `denied` to stop retrying.
+        let msg = ServerMessage.resizeAck(sessionId: "s-1", seq: 9, cols: 100, rows: 30,
+                                          applied: false, denied: true)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["applied"] as? Bool, false)
+        XCTAssertEqual(obj?["denied"] as? Bool, true)
     }
 
     func testResizeAckCapabilityIsAdvertised() {

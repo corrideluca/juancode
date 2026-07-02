@@ -33,6 +33,10 @@ export function setupWebSocket(server: Server): void {
   });
 
   wss.on("connection", (ws) => {
+    // Stable id for this connection, used as its grid-ownership token so a
+    // session's shared pty grid has a single controlling client instead of
+    // flapping last-write-wins between viewers (juancode-1th.1).
+    const clientId = randomUUID();
     // sessionId -> cleanup functions for this connection's subscriptions.
     const subscriptions = new Map<string, () => void>();
     // Editor ptys this connection opened — killed when it disconnects so an
@@ -268,6 +272,9 @@ export function setupWebSocket(server: Server): void {
                 }
               });
             }
+            // The creating client controls the grid it just spawned the session
+            // at, so claim ownership up front (juancode-1th.1).
+            session.resizeGrid(clientId, msg.cols, msg.rows);
             send({ type: "created", session: session.meta });
             subscribe(session.id);
             send({
@@ -285,7 +292,9 @@ export function setupWebSocket(server: Server): void {
         case "attach": {
           const live = registry.get(msg.sessionId);
           if (live) {
-            live.resize(msg.cols, msg.rows);
+            // Arbitrated: a bare attach from a secondary viewer must NOT resize
+            // the pty — only the controlling owner's grid takes (juancode-1th.1).
+            live.resizeGrid(clientId, msg.cols, msg.rows);
             subscribe(msg.sessionId);
             send({
               type: "attached",
@@ -541,11 +550,24 @@ export function setupWebSocket(server: Server): void {
         }
 
         case "resize": {
-          // `resize()` returns whether the grid reached a live pty; a resize that
-          // arrives before the pty is running is dropped. Ack that outcome so a
-          // sequenced client can re-assert instead of trusting a grid that never
-          // landed (juancode-uz6). No pty at all → not applied.
-          const applied = resolvePty(msg.sessionId)?.resize(msg.cols, msg.rows) ?? false;
+          // Sessions arbitrate the shared grid per client (juancode-1th.1): a
+          // non-owner's resize is `denied` and left un-applied so the CLI TUI
+          // can't flap between two viewers' sizes. Ephemeral editor/terminal ptys
+          // are tab-scoped (single owner), so they resize unarbitrated. Either way
+          // `applied` reports whether the grid reached a live pty — a resize that
+          // races session spawn is dropped (applied:false, not denied), so a
+          // sequenced client re-asserts it (juancode-uz6).
+          const session = registry.get(msg.sessionId);
+          let applied: boolean;
+          let denied = false;
+          if (session) {
+            ({ applied, denied } = session.resizeGrid(clientId, msg.cols, msg.rows));
+          } else {
+            applied = (editors.get(msg.sessionId) ?? terminals.get(msg.sessionId))?.resize(
+              msg.cols,
+              msg.rows,
+            ) ?? false;
+          }
           if (msg.seq !== undefined)
             send({
               type: "resizeAck",
@@ -554,6 +576,7 @@ export function setupWebSocket(server: Server): void {
               cols: msg.cols,
               rows: msg.rows,
               applied,
+              denied,
             });
           return;
         }
@@ -570,6 +593,10 @@ export function setupWebSocket(server: Server): void {
     };
 
     ws.on("close", () => {
+      // Release any session grids this client controlled so ownership falls to
+      // the next active viewer's last-known grid (juancode-1th.1). Cheap no-op
+      // for sessions it didn't own.
+      for (const s of registry.all()) s.releaseGrid(clientId);
       for (const cleanup of subscriptions.values()) cleanup();
       subscriptions.clear();
       for (const off of activityWatchers) off();

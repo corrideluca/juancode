@@ -466,9 +466,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         @MainActor private static func nudgeResize(_ tv: TerminalView?, _ session: Session) {
             guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
             let cols = t.cols, rows = t.rows
-            session.resize(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
+            session.resizeLocal(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) {
-                session.resize(cols: cols, rows: rows)
+                session.resizeLocal(cols: cols, rows: rows)
             }
         }
 
@@ -508,7 +508,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             for ms in [100, 400, 1000, 2000, 3500, 5000, 8000] {
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, let g = self.lastGrid else { return }
-                    self.session.resize(cols: g.cols, rows: g.rows)
+                    self.session.resizeLocal(cols: g.cols, rows: g.rows)
                     self.lastSent = g
                 }
                 resyncWork.append(work)
@@ -526,10 +526,13 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             if remembersSize { TerminalGrid.remember(cols: cols, rows: rows) }
             if let last = lastSent, last.cols == cols, last.rows == rows { return }
             lastSent = (cols, rows)
-            session.resize(cols: cols, rows: rows)
+            session.resizeLocal(cols: cols, rows: rows)
         }
 
         func detach() {
+            // This local view is going away — release the shared grid so a remote
+            // viewer (web / phone) can take control of the pty size (juancode-1th.1).
+            session.releaseGrid(owner: GridArbiter.localOwner)
             if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
             resizeWork?.cancel(); resizeWork = nil
