@@ -18,7 +18,7 @@ struct DatabaseRecoveryView: View {
                 Text("Couldn't open the database").font(.title3).bold()
             }
 
-            Text("juancode is running **without saving** this session — new sessions and history won't persist after you quit. Resetting starts a fresh database; your current file is kept as a timestamped backup.")
+            Text("\(AppBranding.name) is running **without saving** this session — new sessions and history won't persist after you quit. Resetting starts a fresh database; your current file is kept as a timestamped backup.")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 

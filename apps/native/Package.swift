@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Juancode",
+    name: "CorriCode",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "JuancodeCore", targets: ["JuancodeCore"]),
@@ -14,7 +14,9 @@ let package = Package(
         // GUI, so apps/web can drive the native backend (u34.3 verification).
         .executable(name: "juancode-serve", targets: ["Serve"]),
         // The native SwiftUI app (juancode-u34.4): the local shell AND the host
-        // of the embedded server. Run with `swift run juancode`.
+        // of the embedded server. Run with `swift run CorriCode`.
+        .executable(name: "CorriCode", targets: ["JuancodeApp"]),
+        // Compatibility alias for existing scripts/docs.
         .executable(name: "juancode", targets: ["JuancodeApp"]),
     ],
     dependencies: [

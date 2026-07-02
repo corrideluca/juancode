@@ -169,7 +169,7 @@ struct JuancodeApp: App {
         do {
             state = try AppState()
         } catch {
-            NSLog("juancode: on-disk database failed to open (\(dbPath)): \(error)")
+            NSLog("\(AppBranding.logPrefix): on-disk database failed to open (\(dbPath)): \(error)")
             do {
                 state = AppState(store: try GRDBStore(inMemory: true))
                 degradedReason = String(describing: error)
@@ -194,7 +194,7 @@ struct JuancodeApp: App {
             do {
                 try await JuancodeServer.run(state: state, host: host, port: Config.port, handleSignals: false)
             } catch {
-                NSLog("juancode: embedded server did not start: \(error)")
+                NSLog("\(AppBranding.logPrefix): embedded server did not start: \(error)")
             }
         }
     }

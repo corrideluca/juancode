@@ -182,7 +182,7 @@ export const notifications = {
       // A burst across many sessions collapses into one replace-in-place summary
       // (single soft chime) instead of one banner + ding per session.
       playChime();
-      osNotify("juancode", "Multiple sessions need your attention", SUMMARY_TAG);
+      osNotify("CorriCode", "Multiple sessions need your attention", SUMMARY_TAG);
       return;
     }
 

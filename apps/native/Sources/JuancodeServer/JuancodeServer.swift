@@ -28,7 +28,7 @@ public enum JuancodeServer {
         let app = Application(
             router: router,
             server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
-            configuration: .init(address: .hostname(host, port: port), serverName: "juancode")
+            configuration: .init(address: .hostname(host, port: port), serverName: "CorriCode")
         )
         if handleSignals {
             try await app.runService()

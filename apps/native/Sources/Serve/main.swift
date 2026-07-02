@@ -14,7 +14,7 @@ let host = Config.bindHost
 let webDist = (FileManager.default.currentDirectoryPath as NSString)
     .appendingPathComponent("../web/dist")
 
-print("juancode-serve listening on http://\(host):\(Config.port)")
+print("CorriCode serve listening on http://\(host):\(Config.port)")
 
 try await JuancodeServer.run(
     state: state,

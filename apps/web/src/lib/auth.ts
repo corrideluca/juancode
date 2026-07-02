@@ -69,7 +69,7 @@ export function promptForToken(): void {
   if (authPrompting) return;
   authPrompting = true;
   const entered = window.prompt(
-    "This juancode server requires an access token. Paste it to continue:",
+    "This CorriCode server requires an access token. Paste it to continue:",
     "",
   );
   if (entered && entered.trim()) {

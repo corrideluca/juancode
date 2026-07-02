@@ -645,7 +645,7 @@ struct SidebarView: View {
         .sheet(isPresented: $showingStatus) {
             StatusPanel()
         }
-        .navigationTitle("juancode")
+        .navigationTitle(AppBranding.name)
         .alert("Rename session", isPresented: Binding(
             get: { renaming != nil },
             set: { if !$0 { renaming = nil } }
@@ -766,7 +766,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func rowContextMenu(_ meta: SessionMeta) -> some View {
         if model.isExternal(meta.id) {
-            Button("Resume in juancode") { model.importExternalSession(meta.id) }
+            Button("Resume in \(AppBranding.name)") { model.importExternalSession(meta.id) }
         } else {
             Button("Rename…") { beginRename(meta) }
             if meta.archived {
@@ -1568,7 +1568,7 @@ struct SessionRow: View {
                 Image(systemName: "play.circle").font(.system(size: 13))
             }
             .buttonStyle(.borderless)
-            .help("From your terminal — resume in juancode")
+            .help("From your terminal — resume in \(AppBranding.name)")
             .clickCursor()
             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
         }
