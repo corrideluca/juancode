@@ -1518,6 +1518,10 @@ struct SessionContainer: View {
                 .help(model.bottomTerminalShown ? "Hide the terminal panel (⌃T)" : "Show the terminal panel (⌃T)")
                 .clickCursor()
                 Button {
+                    // Panel transition: the terminal coordinators must hold the
+                    // intermediate grids this relayout produces and settle once
+                    // with a forced repaint (juancode-1th.2).
+                    LayoutTransitionGate.shared.begin()
                     panelShown.toggle()
                 } label: {
                     Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")

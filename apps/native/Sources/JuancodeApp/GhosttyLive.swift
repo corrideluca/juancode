@@ -219,6 +219,10 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// grid never trails the surface long enough to corrupt; large enough not to
         /// flood the agent's TUI with intermediate widths.
         private let resizeThrottle = DispatchTimeInterval.milliseconds(33)
+        /// How long the surface must stay quiet after a layout-transition resize
+        /// before we assert the settled grid (juancode-1th.2). Longer than any gap
+        /// between the transition's own layout passes, shorter than feels laggy.
+        private let transitionSettleDelay = DispatchTimeInterval.milliseconds(150)
         private let remembersSize: Bool
         var lastFocusToken = 0
         var lastResyncToken = 0
@@ -300,10 +304,24 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// and repaints). The leading edge pushes the first change immediately and
         /// the throttle coalesces the rest, with a guaranteed trailing send for the
         /// final settled size. Also remembered as the next spawn grid.
+        ///
+        /// Exception: while a panel open/close (or fullscreen) transition is in
+        /// flight (`LayoutTransitionGate`), every grid in the burst is intermediate,
+        /// so pushing them (even throttled, even just the leading one) makes the CLI
+        /// repaint mid-transition and leave garbled frames behind. Hold everything
+        /// until the layout stays quiet, then assert the settled grid once with a
+        /// genuine SIGWINCH so the TUI fully re-lays-out — see
+        /// `settleAfterTransition` (juancode-1th.2).
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
             resizeWork?.cancel()
+            if LayoutTransitionGate.shared.active {
+                let work = DispatchWorkItem { [weak self] in self?.settleAfterTransition() }
+                resizeWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + transitionSettleDelay, execute: work)
+                return
+            }
             let now = DispatchTime.now()
             let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
             if earliest <= now {
@@ -313,6 +331,20 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                 resizeWork = work
                 DispatchQueue.main.asyncAfter(deadline: earliest, execute: work)
             }
+        }
+
+        /// A layout transition finished (no new surface grid for
+        /// `transitionSettleDelay`): remember + assert the settled grid via a forced
+        /// full re-layout. The nudge (not a plain resize) matters for the net-zero
+        /// case — toggling a panel open then closed settles at the grid the pty
+        /// already has, where a plain send would dedup to nothing, no SIGWINCH would
+        /// fire, and the frames the surface reflowed mid-transition would stay
+        /// garbled until a manual resync.
+        private func settleAfterTransition() {
+            guard let g = lastSurfaceGrid else { return }
+            if remembersSize { TerminalGrid.remember(cols: g.cols, rows: g.rows) }
+            lastResizeAt = .now()
+            nudge(cols: g.cols, rows: g.rows)
         }
 
         /// Push the *latest* surface grid to the pty. Reads `lastSurfaceGrid` at fire
@@ -374,13 +406,30 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             guard let tv = view else { return }
             tv.fitToSize()
             guard let grid = lastSurfaceGrid ?? lastSent, grid.cols > 0, grid.rows > 0 else { return }
-            let cols = grid.cols, rows = grid.rows
+            nudge(cols: grid.cols, rows: grid.rows)
+        }
+
+        /// Force a genuine SIGWINCH at (cols, rows): drop a row, then restore the
+        /// real one a beat later, so the TUI observes a size change and fully
+        /// re-lays-out even when the grid is unchanged (a same-size TIOCSWINSZ
+        /// delivers no signal). Shared by the manual resync and the automatic
+        /// layout-transition settle. Mirrors `sendResize`'s adopt-or-retry: if the
+        /// pty isn't running yet the final size was dropped, so leave it un-cached
+        /// and schedule a retry rather than pretending it landed.
+        private func nudge(cols: Int, rows: Int) {
             lastSent = nil
             session.resizeLocal(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
                 guard let self else { return }
-                self.lastSent = (cols, rows)
-                self.session.resizeLocal(cols: cols, rows: rows)
+                if self.session.resizeLocal(cols: cols, rows: rows) {
+                    self.lastSent = (cols, rows)
+                    self.resizeRetries = 0
+                    self.resizeRetryWork?.cancel()
+                    self.resizeRetryWork = nil
+                } else {
+                    self.lastSent = nil
+                    self.scheduleResizeRetry()
+                }
             }
         }
 
@@ -503,11 +552,19 @@ struct GhosttyEphemeral: NSViewRepresentable {
 
         /// Leading+trailing throttle so the pty stays in lockstep with the surface
         /// during a drag — see the main pane's `terminalDidResize` for why a pure
-        /// trailing debounce corrupts the agent's render here.
+        /// trailing debounce corrupts the agent's render here, and for why a
+        /// layout transition (panel toggle) instead holds every intermediate grid
+        /// and settles once with a forced re-layout (juancode-1th.2).
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
             resizeWork?.cancel()
+            if LayoutTransitionGate.shared.active {
+                let work = DispatchWorkItem { [weak self] in self?.settleAfterTransition() }
+                resizeWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: work)
+                return
+            }
             let now = DispatchTime.now()
             let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
             if earliest <= now {
@@ -516,6 +573,20 @@ struct GhosttyEphemeral: NSViewRepresentable {
                 let work = DispatchWorkItem { [weak self] in self?.flushSurfaceGrid() }
                 resizeWork = work
                 DispatchQueue.main.asyncAfter(deadline: earliest, execute: work)
+            }
+        }
+
+        /// Assert the settled grid after a layout transition with a genuine
+        /// SIGWINCH (rows-1 then the real rows) — a shell prompt redraws fine
+        /// either way, but a TUI running in this pane needs the forced re-layout
+        /// for the same net-zero-toggle reason as the main pane.
+        private func settleAfterTransition() {
+            guard let g = lastSurfaceGrid else { return }
+            lastResizeAt = .now()
+            lastSent = (g.cols, g.rows)
+            pty.resize(cols: g.cols, rows: g.rows > 2 ? g.rows - 1 : g.rows + 1)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
+                self?.pty.resize(cols: g.cols, rows: g.rows)
             }
         }
 

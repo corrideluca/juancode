@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import JuancodeCore
 
 extension View {
     /// Web-like affordance for a clickable control: the pointing-hand cursor on
@@ -118,7 +119,14 @@ struct DragResizeHandle: View {
                     if previewOnly { preview = next } else { value = next }
                 }
                 .onEnded { _ in
-                    if previewOnly, let target = preview { value = target }
+                    if previewOnly, let target = preview {
+                        // Committing the previewed size reflows any live terminal
+                        // in one jump — mark it a layout transition so the pty gets
+                        // one settled grid + a forced repaint instead of the raw
+                        // relayout burst (juancode-1th.2).
+                        LayoutTransitionGate.shared.begin()
+                        value = target
+                    }
                     preview = nil
                     dragging = false
                     dragStart = nil

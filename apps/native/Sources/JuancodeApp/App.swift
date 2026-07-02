@@ -56,6 +56,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         }
 
+        // A fullscreen toggle animates the window through a burst of intermediate
+        // geometries — the same "discrete layout transition" as a panel toggle, so
+        // gate it too: the terminal coordinators hold every intermediate grid and
+        // assert the settled one once, with a forced repaint (juancode-1th.2). The
+        // will* window covers the animation; the did* re-arm covers any trailing
+        // layout pass after it completes.
+        for name in [NSWindow.willEnterFullScreenNotification, NSWindow.willExitFullScreenNotification] {
+            restoreObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                LayoutTransitionGate.shared.begin(for: .milliseconds(1000))
+            })
+        }
+        for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            restoreObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                LayoutTransitionGate.shared.begin(for: .milliseconds(350))
+            })
+        }
+
         // Apply the user's saved appearance (juancode light/dark toggle) to the window
         // chrome at launch; defaults to dark to preserve the app's pure-black look that
         // blends into the SwiftTerm views. Runtime changes go through

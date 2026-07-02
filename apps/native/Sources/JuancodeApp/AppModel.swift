@@ -1881,6 +1881,9 @@ final class AppModel {
     /// selected session's folder if that folder has none yet (mirrors the header
     /// button). No-op seeding if nothing is selected.
     func toggleBottomTerminal() {
+        // Panel transition: the terminal coordinators must hold the intermediate
+        // grids this relayout produces and settle once (juancode-1th.2).
+        LayoutTransitionGate.shared.begin()
         bottomTerminalShown.toggle()
         guard bottomTerminalShown,
               let id = selection,

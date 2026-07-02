@@ -492,11 +492,52 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// debounced SIGWINCH so the pty tracks the actual on-screen size.
         func gridChanged(cols: Int, rows: Int) {
             guard cols > 0, rows > 0 else { return }
+            scheduleResize(cols: cols, rows: rows)
+        }
+
+        /// True when a grid change in the pending debounce window arrived during a
+        /// panel open/close transition (`LayoutTransitionGate`) — the flush must
+        /// then force a full re-layout (nudge) rather than a plain resize: a
+        /// net-zero toggle settles at the grid the pty already has, where a plain
+        /// send dedups to nothing, no SIGWINCH fires, and the frames rendered
+        /// mid-transition stay garbled until a manual resync (juancode-1th.2).
+        private var settleAfterTransition = false
+
+        /// Trailing-debounced resize: cache the latest grid and (re)arm the flush.
+        /// The debounce already suppresses intermediate grids; the transition flag
+        /// upgrades the eventual flush to a forced re-layout.
+        private func scheduleResize(cols: Int, rows: Int) {
             lastGrid = (cols, rows)
+            if LayoutTransitionGate.shared.active { settleAfterTransition = true }
             resizeWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.sendResize(cols: cols, rows: rows) }
+            let work = DispatchWorkItem { [weak self] in self?.flushResize() }
             resizeWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(90), execute: work)
+            let delay: DispatchTimeInterval = settleAfterTransition ? .milliseconds(150) : .milliseconds(90)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+
+        /// Push the latest grid to the pty. After a layout transition, do it as a
+        /// genuine SIGWINCH (see `settleAfterTransition`) so the TUI fully
+        /// re-lays-out at the settled size.
+        private func flushResize() {
+            guard let g = lastGrid else { return }
+            if settleAfterTransition {
+                settleAfterTransition = false
+                if remembersSize { TerminalGrid.remember(cols: g.cols, rows: g.rows) }
+                // Genuine SIGWINCH at the settled grid (see `nudgeResize`, minus
+                // the main-actor view read — `lastGrid` already is the settled
+                // size): drop a row, then restore the real one a beat later.
+                lastSent = nil
+                session.resizeLocal(cols: g.cols, rows: g.rows > 2 ? g.rows - 1 : g.rows + 1)
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, let g = self.lastGrid else { return }
+                    self.lastSent = g
+                    self.session.resizeLocal(cols: g.cols, rows: g.rows)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: work)
+            } else {
+                sendResize(cols: g.cols, rows: g.rows)
+            }
         }
 
         private func scheduleInitialResync() {
@@ -553,11 +594,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // into a single SIGWINCH. SwiftTerm has already resized its own grid for
             // rendering; we just avoid hammering the agent's TUI with intermediate
             // widths mid-stream, which interleaves partial redraws into garbage.
-            lastGrid = (newCols, newRows)
-            resizeWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.sendResize(cols: newCols, rows: newRows) }
-            resizeWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(90), execute: work)
+            guard newCols > 0, newRows > 0 else { return }
+            scheduleResize(cols: newCols, rows: newRows)
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}
