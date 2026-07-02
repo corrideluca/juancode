@@ -540,6 +540,7 @@ struct SidebarView: View {
                     Button { model.loadMoreExternalSessions() } label: {
                         Label("Load more terminal sessions", systemImage: "ellipsis.circle")
                             .font(.system(size: 11))
+                            .foregroundStyle(.primary)
                     }
                     .buttonStyle(.borderless)
                     .clickCursor()
@@ -676,6 +677,7 @@ struct SidebarView: View {
                 Label("Load more (\(sessions.count - folderPreviewCount))",
                       systemImage: "chevron.down.circle")
                     .font(.system(size: 11))
+                    .foregroundStyle(.primary)
             }
             .buttonStyle(.borderless)
             .clickCursor()
@@ -703,7 +705,9 @@ struct SidebarView: View {
             DragResizeHandle(axis: .horizontal, value: $folderScrollMaxHeight,
                              min: 120, max: 800, invert: false)
             Button { expandedFolders.remove(cwd) } label: {
-                Label("Show less", systemImage: "chevron.up.circle").font(.system(size: 11))
+                Label("Show less", systemImage: "chevron.up.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.primary)
             }
             .buttonStyle(.borderless)
             .clickCursor()
