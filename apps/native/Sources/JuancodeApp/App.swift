@@ -262,13 +262,13 @@ struct JuancodeApp: App {
                     performShortcut(.toggleTerminal, model: model, oracle: oracle)
                 }
                 .appShortcut(.toggleTerminal, shortcuts)
-                // Global Oracle + issues access (juancode-6sw). ⌃Space toggles the
-                // Oracle panel from anywhere; ⌘⇧I jumps straight to global issues.
+                // Global Oracle + boards access. ⌃Space toggles the Oracle panel
+                // from anywhere; ⌘⇧I jumps straight to boards.
                 Button("Oracle") {
                     performShortcut(.oracle, model: model, oracle: oracle)
                 }
                 .appShortcut(.oracle, shortcuts)
-                Button("Global Issues") {
+                Button("Boards") {
                     performShortcut(.globalIssues, model: model, oracle: oracle)
                 }
                 .appShortcut(.globalIssues, shortcuts)

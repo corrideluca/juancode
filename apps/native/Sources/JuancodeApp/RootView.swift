@@ -80,10 +80,10 @@ struct RootView: View {
                       : "Show GitHub Actions for \(model.githubActionsRepo)")
                 .foregroundStyle(model.githubActionsRuns.contains(where: { actionRunProblem($0) }) ? Color.orange : Color.primary)
                 .clickCursor()
-                Button { oracle.open(tab: .issues) } label: {
-                    Label("Issues", systemImage: "tray.full")
+                Button { oracle.open(tab: .boards) } label: {
+                    Label("Boards", systemImage: "rectangle.grid.2x2")
                 }
-                .help("Global issues (Oracle tracker)")
+                .help("Boards in Oracle")
                 .clickCursor()
                 Button { oracle.open(tab: .chat) } label: {
                     Label("Oracle", systemImage: "sparkles")

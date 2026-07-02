@@ -365,28 +365,40 @@ private struct TrackedPrRow: View {
 // MARK: - GitHub boards
 
 struct GithubBoardsSheet: View {
-    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var url = ""
-    @State private var selectedIssue: GithubProjectIssue?
-    @State private var createBoardId: String?
-    @State private var draftTitle = ""
-    @State private var draftBody = ""
-
-    private var trimmedUrl: String { url.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canAdd: Bool { parseGithubProjectURL(trimmedUrl, now: 0) != nil }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("GitHub Boards").font(.title3).bold()
                 Spacer()
-                Button { model.refreshGithubBoards() } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.borderless).help("Refresh boards").clickCursor()
                 Button("Done") { dismiss() }.clickCursor()
             }
             .padding()
             Divider()
+            GithubBoardsPanelContent()
+        }
+        .frame(width: 780, height: 560)
+    }
+}
+
+struct GithubBoardsPanelContent: View {
+    @Environment(AppModel.self) private var model
+    @State private var url = ""
+    @State private var selectedIssue: GithubProjectIssue?
+    @State private var createBoardId: String?
+    @State private var draftTitle = ""
+    @State private var draftBody = ""
+    @AppStorage("githubBoards.collapsedBoardIds") private var collapsedBoardIdsRaw = ""
+
+    private var trimmedUrl: String { url.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canAdd: Bool { parseGithubProjectURL(trimmedUrl, now: 0) != nil }
+    private var collapsedBoardIds: Set<String> {
+        Set(collapsedBoardIdsRaw.split(separator: ",").map(String.init))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
             addBoardForm
             Divider()
             if model.githubBoards.isEmpty {
@@ -408,6 +420,8 @@ struct GithubBoardsSheet: View {
                                 board: board,
                                 result: model.githubBoardItems[board.id],
                                 loading: model.githubBoardLoading.contains(board.id),
+                                collapsed: collapsedBoardIds.contains(board.id),
+                                toggleCollapsed: { toggleCollapsed(board.id) },
                                 selectedIssue: $selectedIssue,
                                 createBoardId: $createBoardId)
                             Divider()
@@ -416,7 +430,6 @@ struct GithubBoardsSheet: View {
                 }
             }
         }
-        .frame(width: 780, height: 560)
         .onAppear { model.refreshGithubBoards() }
         .sheet(item: $selectedIssue) { issue in
             GithubProjectIssueDetail(issue: issue)
@@ -436,6 +449,12 @@ struct GithubBoardsSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12))
                     .onSubmit(addBoard)
+                Button { model.refreshGithubBoards() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh boards")
+                .clickCursor()
                 Button { addBoard() } label: {
                     Label("Add Board", systemImage: "plus")
                 }
@@ -454,6 +473,12 @@ struct GithubBoardsSheet: View {
         guard canAdd else { return }
         _ = model.addGithubBoard(url: trimmedUrl)
         url = ""
+    }
+
+    private func toggleCollapsed(_ id: String) {
+        var ids = collapsedBoardIds
+        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+        collapsedBoardIdsRaw = ids.sorted().joined(separator: ",")
     }
 
     private func createIssueSheet(_ board: GithubProjectBoard) -> some View {
@@ -500,12 +525,23 @@ private struct GithubBoardSection: View {
     let board: GithubProjectBoard
     let result: GithubProjectItemsResult?
     let loading: Bool
+    let collapsed: Bool
+    let toggleCollapsed: () -> Void
     @Binding var selectedIssue: GithubProjectIssue?
     @Binding var createBoardId: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
+                Button(action: toggleCollapsed) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14)
+                }
+                .buttonStyle(.plain)
+                .help(collapsed ? "Expand board" : "Minimize board")
+                .clickCursor()
                 Image(systemName: "rectangle.grid.2x2")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
@@ -514,6 +550,15 @@ private struct GithubBoardSection: View {
                     Text(board.url).font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
                 Spacer()
+                if let result, result.available {
+                    Text("\(result.issues.count)")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.18))
+                        .foregroundStyle(.secondary)
+                        .clipShape(Capsule())
+                        .help("\(result.issues.count) assigned issue(s)")
+                }
                 if loading { ProgressView().controlSize(.small) }
                 Button { createBoardId = board.id } label: { Image(systemName: "plus.circle") }
                     .buttonStyle(.borderless).help("Create draft issue in this board").clickCursor()
@@ -530,7 +575,9 @@ private struct GithubBoardSection: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
             let issues = result?.issues ?? []
-            if let result, !result.available {
+            if collapsed {
+                EmptyView()
+            } else if let result, !result.available {
                 Text(result.error ?? "Could not load GitHub Project items.")
                     .font(.system(size: 11)).foregroundStyle(.orange)
                     .padding(.horizontal, 40).padding(.bottom, 10)

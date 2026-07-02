@@ -40,7 +40,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .recalcGeometry: return "Recalculate Terminal Geometry"
         case .toggleTerminal: return "Toggle Terminal"
         case .oracle: return "Oracle (chat)"
-        case .globalIssues: return "Global Issues"
+        case .globalIssues: return "Boards"
         case .focusSessionSearch: return "Find Sessions"
         }
     }
@@ -217,7 +217,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .recalcGeometry: model.resyncTerminalGeometry()
     case .toggleTerminal: model.toggleBottomTerminal()
     case .oracle: oracle.toggleChatFocused()
-    case .globalIssues: oracle.open(tab: .issues)
+    case .globalIssues: oracle.open(tab: .boards)
     case .focusSessionSearch: model.focusSessionSearch()
     }
 }

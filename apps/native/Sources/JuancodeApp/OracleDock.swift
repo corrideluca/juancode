@@ -9,6 +9,7 @@ import JuancodeServices
 /// so the agent CLI always boots into a usable, stable grid (a fixed drawer avoids
 /// the live-reflow fragility of a free-floating resizable panel).
 struct OracleDock: View {
+    @Environment(AppModel.self) private var model
     @Environment(OracleModel.self) private var oracle
     /// Persisted panel width (drag the left edge). Floored so the agent CLI never
     /// renders into too few columns (which garbles its TUI).
@@ -115,8 +116,8 @@ struct OracleDock: View {
             Text("Oracle").font(.system(size: 13, weight: .semibold))
             Spacer()
             switch oracle.tab {
-            case .issues:
-                headerButton("arrow.clockwise", help: "Refresh issues") { oracle.loadGlobalBeads() }
+            case .boards:
+                headerButton("arrow.clockwise", help: "Refresh boards") { model.refreshGithubBoards() }
             case .chat:
                 headerButton(sessionRailShown ? "sidebar.left" : "sidebar.squares.left",
                              help: sessionRailShown ? "Hide the session list" : "Show the session list") {
@@ -142,13 +143,15 @@ struct OracleDock: View {
     }
 
     @ViewBuilder private var content: some View {
-        if let err = oracle.setupError {
+        if oracle.tab == .boards {
+            GithubBoardsPanelContent()
+        } else if let err = oracle.setupError {
             centered("Oracle unavailable:\n\(err)")
         } else if !oracle.ready {
             centered("Setting up Oracle…")
         } else {
             switch oracle.tab {
-            case .issues: OracleIssuesView()
+            case .boards: GithubBoardsPanelContent()
             case .chat: OracleChatView()
             }
         }
@@ -174,11 +177,11 @@ struct OracleDock: View {
 private struct OracleTabBar: View {
     @Binding var selection: OracleModel.OracleTab
 
-    /// SF Symbol per tab, echoing the toolbar's Issues (`tray.full`) / Oracle
+    /// SF Symbol per tab, echoing the toolbar's Boards (`rectangle.grid.2x2`) / Oracle
     /// (`sparkles`) buttons so the same concept carries the same glyph.
     private func icon(_ tab: OracleModel.OracleTab) -> String {
         switch tab {
-        case .issues: return "tray.full"
+        case .boards: return "rectangle.grid.2x2"
         case .chat: return "sparkles"
         }
     }
@@ -238,181 +241,6 @@ private struct OracleTabButton: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.easeOut(duration: 0.12), value: selected)
         .pointerCursor()
-    }
-}
-
-/// The global bd tracker, grouped by actionability via `BeadsGrouping`. Each open
-/// item offers Dispatch… (spawn an agent in a project) and Ask Oracle (hand the
-/// item to the agent to reason about).
-private struct OracleIssuesView: View {
-    @Environment(OracleModel.self) private var oracle
-    @State private var query = ""
-
-    private var result: BeadsResult? { oracle.globalBeads }
-
-    private var groups: [BeadsGroup] {
-        guard let r = result, r.available else { return [] }
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let filtered = q.isEmpty ? r.issues
-            : r.issues.filter { "\($0.id) \($0.title)".lowercased().contains(q) }
-        return BeadsGrouping.grouped(filtered, includeClosed: false)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Refresh now lives in the dock header alongside the other controls
-            // (juancode-cwa); this row is just the filter field.
-            TextField("Filter global items…", text: $query)
-                .textFieldStyle(.roundedBorder).font(.system(size: 11))
-                .padding(.horizontal, 12).padding(.vertical, 8)
-            Divider()
-            content
-        }
-    }
-
-    @ViewBuilder private var content: some View {
-        if result == nil {
-            centered("Loading…")
-        } else if let r = result, !r.available {
-            centered(r.error ?? "No global tracker yet")
-        } else if groups.isEmpty {
-            centered(query.isEmpty ? "No global items yet.\nAsk Oracle to capture one." : "No matching items")
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(groups, id: \.section) { group in
-                        HStack {
-                            Text(group.section.title.uppercased())
-                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                            Text("\(group.issues.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
-                        ForEach(group.issues, id: \.id) { issue in
-                            OracleIssueRow(issue: issue)
-                            Divider()
-                        }
-                    }
-                }
-                .padding(.bottom, 8)
-            }
-        }
-    }
-
-    private func centered(_ text: String) -> some View {
-        VStack {
-            Spacer()
-            Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).padding(.horizontal, 16)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// One global item: status dot, id/priority, title, and the dispatch / ask actions.
-private struct OracleIssueRow: View {
-    @Environment(OracleModel.self) private var oracle
-    let issue: BeadsIssue
-    @State private var showingDispatch = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle().fill(statusColor).frame(width: 7, height: 7).help(statusLabel)
-                Text("p\(issue.priority)").font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
-                Text(issue.id).font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                if issue.blocked {
-                    Text("blocked").font(.system(size: 9)).foregroundStyle(.orange)
-                }
-            }
-            Text(issue.title).font(.system(size: 12)).lineLimit(2).help(issue.title)
-            if !issue.isClosed {
-                HStack(spacing: 12) {
-                    Button("Dispatch…") { showingDispatch = true }
-                        .buttonStyle(.borderless).font(.system(size: 11))
-                        .help("Spawn an agent in a project, seeded with this item")
-                        .popover(isPresented: $showingDispatch, arrowEdge: .bottom) {
-                            OracleDispatchPicker(issue: issue) { showingDispatch = false }
-                        }
-                        .clickCursor()
-                    Button("Ask Oracle") {
-                        oracle.ask(issuePrompt(id: issue.id, title: issue.title))
-                    }
-                    .buttonStyle(.borderless).font(.system(size: 11))
-                    .help("Hand this item to the Oracle agent to reason about / orchestrate")
-                    .clickCursor()
-                    Spacer()
-                }
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-    }
-
-    private var statusColor: Color {
-        if issue.isClosed { return .secondary }
-        if issue.blocked { return .orange }
-        if issue.ready { return .green }
-        return .blue
-    }
-    private var statusLabel: String {
-        if issue.isClosed { return "Closed" }
-        if issue.blocked { return "Blocked" }
-        if issue.ready { return "Ready" }
-        return issue.status
-    }
-}
-
-/// Pick the target project + provider + worktree for dispatching a global item.
-/// Project choices are the work dirs already in play, plus a free-text path.
-private struct OracleDispatchPicker: View {
-    @Environment(OracleModel.self) private var oracle
-    let issue: BeadsIssue
-    let dismiss: () -> Void
-
-    @State private var project = ""
-    @State private var provider: ProviderId = .claude
-    @State private var worktree = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Dispatch \(issue.id)").font(.system(size: 12, weight: .semibold))
-            if !oracle.knownProjects.isEmpty {
-                Picker("Project", selection: $project) {
-                    Text("Choose a project…").tag("")
-                    ForEach(oracle.knownProjects, id: \.self) { p in
-                        Text((p as NSString).lastPathComponent).tag(p)
-                    }
-                }
-                .font(.system(size: 11))
-            }
-            TextField("Project path", text: $project)
-                .textFieldStyle(.roundedBorder).font(.system(size: 11))
-            Picker("Agent", selection: $provider) {
-                ForEach(ProviderId.aiCases, id: \.self) { Text(Providers.spec(for: $0).label).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden()
-            Toggle("Isolate in a fresh git worktree", isOn: $worktree)
-                .toggleStyle(.checkbox).font(.system(size: 11))
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.controlSize(.small).clickCursor()
-                Button("Dispatch") {
-                    oracle.dispatch(
-                        project: project.trimmingCharacters(in: .whitespaces),
-                        prompt: issuePrompt(id: issue.id, title: issue.title),
-                        provider: provider, worktree: worktree)
-                    dismiss()
-                }
-                .controlSize(.small)
-                .keyboardShortcut(.defaultAction)
-                .disabled(project.trimmingCharacters(in: .whitespaces).isEmpty)
-                .clickCursor()
-            }
-        }
-        .padding(12)
-        .frame(width: 300)
     }
 }
 
