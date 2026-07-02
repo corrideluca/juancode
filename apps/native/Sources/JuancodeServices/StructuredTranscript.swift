@@ -134,7 +134,11 @@ private func codexRecordKinds(_ rec: [String: Any]) -> [StructuredEventKind] {
 
 /// Normalize one parsed transcript record into the structured-event kinds it carries.
 public func transcriptRecordKinds(_ provider: ProviderId, _ rec: [String: Any]) -> [StructuredEventKind] {
-    provider == .claude ? claudeRecordKinds(rec) : codexRecordKinds(rec)
+    switch provider {
+    case .claude: return claudeRecordKinds(rec)
+    case .codex: return codexRecordKinds(rec)
+    case .terminal: return []
+    }
 }
 
 /// A byte-offset tailer over a session's transcript that emits batches of structured

@@ -7,6 +7,15 @@ import Foundation
 public enum ProviderId: String, Codable, Sendable, CaseIterable {
     case claude
     case codex
+    case terminal
+}
+
+public extension ProviderId {
+    /// Providers that run AI coding CLIs and have auth/MCP/transcript semantics.
+    static let aiCases: [ProviderId] = [.claude, .codex]
+
+    /// Providers that can be launched as interactive sessions from the UI.
+    static let launchCases: [ProviderId] = [.claude, .codex, .terminal]
 }
 
 /// Inferred live activity of a running session. Derived from the pty stream

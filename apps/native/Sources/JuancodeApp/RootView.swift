@@ -928,7 +928,7 @@ private struct FolderHeader: View {
                 .onHover { plusHovering = $0 }
                 .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(ProviderId.allCases, id: \.self) { p in
+                        ForEach(ProviderId.launchCases, id: \.self) { p in
                             Button {
                                 model.createInFolder(provider: p, cwd: group.cwd)
                                 showingAgentPicker = false
@@ -1832,11 +1832,13 @@ struct SessionContainer: View {
         }
         .navigationTitle(meta.title)
         .perfTrackBody()
-        // Opening an exited session auto-revives it — no manual "Reactivate" click.
+        // Opening an exited agent session auto-revives it — no manual "Reactivate" click.
+        // Plain terminal sessions have no resumable AI transcript, so exited shells
+        // remain as scrollback until the user starts a new Terminal session.
         // The container is keyed by id in DetailView, so this fires once per open;
         // `reactivate` no-ops if already live and degrades to replay if it can't resume.
         .task(id: meta.id) {
-            if !model.isLive(meta.id) { await model.reactivate(meta.id) }
+            if meta.provider != .terminal, !model.isLive(meta.id) { await model.reactivate(meta.id) }
         }
     }
 
@@ -1905,8 +1907,8 @@ struct NewSessionView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New Session").font(.title2).bold()
             Form {
-                Picker("Agent", selection: $provider) {
-                    ForEach(ProviderId.allCases, id: \.self) { p in
+                Picker("Session type", selection: $provider) {
+                    ForEach(ProviderId.launchCases, id: \.self) { p in
                         Text(Providers.spec(for: p).label).tag(p)
                     }
                 }
@@ -1915,7 +1917,9 @@ struct NewSessionView: View {
                     Button("Choose…") { showingDirPicker = true }
                         .clickCursor()
                 }
-                Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
+                if provider != .terminal {
+                    Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
+                }
                 Toggle("Isolate in a fresh git worktree", isOn: $isolateWorktree)
             }
             continueExisting
@@ -2005,7 +2009,8 @@ struct NewSessionView: View {
         creating = true
         Task {
             let session = await model.create(provider: provider, cwd: cwd,
-                                             skipPermissions: skipPermissions, isolateWorktree: isolateWorktree)
+                                             skipPermissions: provider == .terminal ? false : skipPermissions,
+                                             isolateWorktree: isolateWorktree)
             creating = false
             if session != nil { dismiss() }
         }

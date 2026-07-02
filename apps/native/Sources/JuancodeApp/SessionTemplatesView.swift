@@ -190,7 +190,7 @@ private struct SessionTemplateEditor: View {
             Form {
                 TextField("Name", text: $name)
                 Picker("Agent", selection: $provider) {
-                    ForEach(ProviderId.allCases, id: \.self) { p in
+                    ForEach(ProviderId.launchCases, id: \.self) { p in
                         Text(Providers.spec(for: p).label).tag(p)
                     }
                 }

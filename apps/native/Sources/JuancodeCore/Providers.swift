@@ -95,12 +95,25 @@ public enum Providers {
         }
     )
 
-    public static let all: [ProviderId: ProviderSpec] = [.claude: claude, .codex: codex]
+    public static let terminal = ProviderSpec(
+        id: .terminal,
+        label: "Terminal",
+        pinsSessionId: false,
+        startArgs: { _, _ in [] },
+        resumeArgs: { _, _ in [] }
+    )
+
+    public static let all: [ProviderId: ProviderSpec] = [
+        .claude: claude,
+        .codex: codex,
+        .terminal: terminal,
+    ]
 
     public static func spec(for id: ProviderId) -> ProviderSpec {
         switch id {
         case .claude: return claude
         case .codex: return codex
+        case .terminal: return terminal
         }
     }
 }
@@ -191,6 +204,7 @@ public struct DefaultBinaryResolver: BinaryResolver {
         switch provider {
         case .claude: return resolveBin("claude", override: env["JUANCODE_CLAUDE_BIN"])
         case .codex: return resolveBin("codex", override: env["JUANCODE_CODEX_BIN"])
+        case .terminal: return env["SHELL"].flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
         }
     }
 }

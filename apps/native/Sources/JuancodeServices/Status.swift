@@ -276,7 +276,7 @@ private func getProviderStatus(_ id: ProviderId, resolver: BinaryResolver) async
 /// matching the TS `Promise.all(...map(...))` result ordering.
 public func getAllStatus(resolver: BinaryResolver = DefaultBinaryResolver()) async -> [ProviderStatus] {
     await withTaskGroup(of: (Int, ProviderStatus).self) { group in
-        let ids = ProviderId.allCases
+        let ids = ProviderId.aiCases
         for (index, id) in ids.enumerated() {
             group.addTask { (index, await getProviderStatus(id, resolver: resolver)) }
         }

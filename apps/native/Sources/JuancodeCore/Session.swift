@@ -249,20 +249,24 @@ public final class Session: @unchecked Sendable {
         }
 
         // Keep the title + usage in sync with the CLI's own transcript.
-        startTitleWatch()
+        if meta.provider != .terminal {
+            startTitleWatch()
+        }
         // Preferred activity signal: pulse the detector busy on each batch of agent
         // records the CLI appends to its transcript. The id is read via a getter so
         // Codex (which discovers its id after spawn) starts tailing once it lands. The
         // backlog (`reset: true`) is skipped so a resumed session's replayed prior turns
         // don't spuriously pulse busy at startup — only newly appended records count.
-        let stop = env.startActivityTail(
-            meta.provider,
-            { [weak self] in self?.meta.cliSessionId },
-            { [weak self] kinds, reset in
-                if !reset { self?.detector.feedStructured(kinds) }
-            }
-        )
-        lock.withLock { stopActivityTail = stop }
+        if meta.provider != .terminal {
+            let stop = env.startActivityTail(
+                meta.provider,
+                { [weak self] in self?.meta.cliSessionId },
+                { [weak self] kinds, reset in
+                    if !reset { self?.detector.feedStructured(kinds) }
+                }
+            )
+            lock.withLock { stopActivityTail = stop }
+        }
         // Seed the desired grid with the spawn size and re-assert it once the TUI is
         // up, so a slow-booting CLI that missed early SIGWINCHs still adopts it
         // (juancode-1th.3) — the server-side replacement for per-client retry timers.

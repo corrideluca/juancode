@@ -197,7 +197,9 @@ public func deriveSessionTitle(
     _ cliSessionId: String,
     _ roots: TitleRoots = TitleRoots()
 ) async -> String? {
-    if provider == .claude {
+    if provider == .terminal {
+        return nil
+    } else if provider == .claude {
         return await deriveClaudeTitle(cliSessionId, roots.claudeProjects ?? CLAUDE_PROJECTS)
     } else {
         return await deriveCodexTitle(cliSessionId, roots.codexSessions ?? CODEX_SESSIONS)

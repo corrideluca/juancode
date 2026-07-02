@@ -390,7 +390,7 @@ private struct OracleDispatchPicker: View {
             TextField("Project path", text: $project)
                 .textFieldStyle(.roundedBorder).font(.system(size: 11))
             Picker("Agent", selection: $provider) {
-                ForEach(ProviderId.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
+                ForEach(ProviderId.aiCases, id: \.self) { Text(Providers.spec(for: $0).label).tag($0) }
             }
             .pickerStyle(.segmented).labelsHidden()
             Toggle("Isolate in a fresh git worktree", isOn: $worktree)

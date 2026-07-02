@@ -119,7 +119,7 @@ final class GetAllStatusTests: XCTestCase {
         let resolver = FakeResolver(paths: [.claude: claude, .codex: codex])
         let all = await getAllStatus(resolver: resolver)
 
-        // Order preserved (ProviderId.allCases: claude, then codex).
+        // Order preserved (ProviderId.aiCases: claude, then codex).
         XCTAssertEqual(all.map { $0.id }, [.claude, .codex])
 
         let c = all[0]

@@ -221,7 +221,9 @@ public func deriveSessionUsage(
     _ cliSessionId: String,
     _ roots: UsageRoots = UsageRoots()
 ) async -> SessionUsage? {
-    if provider == .claude {
+    if provider == .terminal {
+        return nil
+    } else if provider == .claude {
         return await deriveClaudeUsage(cliSessionId, roots.claudeProjects ?? CLAUDE_PROJECTS)
     } else {
         return await deriveCodexUsage(cliSessionId, roots.codexSessions ?? CODEX_SESSIONS)

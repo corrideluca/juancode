@@ -846,7 +846,7 @@ private struct RecurringTaskCreateForm: View {
         Form {
             TextField("Title (optional)", text: $title)
             Picker("Agent", selection: $provider) {
-                ForEach(ProviderId.allCases, id: \.self) { p in
+                ForEach(ProviderId.aiCases, id: \.self) { p in
                     Text(Providers.spec(for: p).label).tag(p)
                 }
             }
