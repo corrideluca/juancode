@@ -847,28 +847,98 @@ private struct FolderHeader: View {
         SessionUsageFormat.cost(group.sessions.aggregateUsage()?.costUsd)
     }
 
+    /// Open bd issues in this folder — mirrors `FolderIssues`' own filter so we can
+    /// decide whether the second (metadata) line has anything to show.
+    private var openIssueCount: Int {
+        guard let r = model.beads(group.cwd), r.available else { return 0 }
+        return r.issues.filter { $0.status != "closed" }.count
+    }
+
+    /// Open PRs in this folder — mirrors `FolderPrs`, same purpose as above.
+    private var openPrCount: Int {
+        guard let r = model.prs(group.cwd), r.available else { return 0 }
+        return r.prs.count
+    }
+
+    /// Whether the metadata line has any signal. Keeps an idle folder a single line.
+    private func showsMeta(_ risk: (main: WorkAtRisk?, worktrees: Int)) -> Bool {
+        group.running > 0 || unreadCount > 0 || risk.main != nil || risk.worktrees > 0
+            || openIssueCount > 0 || openPrCount > 0
+    }
+
     var body: some View {
-        HStack(spacing: 6) {
-            // Chevron + name + running-count + the empty stretch up to the "+" menu all
-            // form the collapse toggle (the trailing Spacer lives *inside* the button so
-            // the whole row width is clickable); the "+" menu and PR/issue badges stay
-            // separately clickable.
-            Button(action: toggle) {
-                HStack(spacing: 6) {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text(group.name)
-                        .font(.system(size: 15, weight: .semibold))
-                        .lineLimit(1)
-                        .help(folderHelp)
-                    // Quiet metadata cluster: a single 10pt style, semantic color only
-                    // where it's a signal (green running, red unread). The per-project
-                    // cost rollup lives in the header tooltip now (juancode-341).
+        // Two-line layout (juancode-…): name gets its own line so it no longer
+        // truncates behind the badge cluster; all counts drop to a second line.
+        let risk = atRiskRoots
+        VStack(alignment: .leading, spacing: 5) {
+            // Line 1: collapse toggle (chevron + name, full-width clickable) + the
+            // per-folder "+" agent menu.
+            HStack(spacing: 6) {
+                Button(action: toggle) {
+                    HStack(spacing: 6) {
+                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(group.name)
+                            .font(.system(size: 15, weight: .semibold))
+                            .lineLimit(1)
+                            .help(folderHelp)
+                        Spacer(minLength: 8)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .clickCursor()
+                // A popover (not a native Menu) so each agent option is a real SwiftUI
+                // button: it gets the pointing-hand cursor + hover highlight, and clicks
+                // register reliably (native menu rows did neither).
+                Button { showingAgentPicker = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.appHairline(plusHovering ? 0.14 : 0)))
+                }
+                .buttonStyle(.plain)
+                .help("New session in \(group.cwd)")
+                .clickCursor()
+                .onHover { plusHovering = $0 }
+                .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(ProviderId.allCases, id: \.self) { p in
+                            Button {
+                                model.createInFolder(provider: p, cwd: group.cwd)
+                                showingAgentPicker = false
+                            } label: {
+                                Text(Providers.spec(for: p).label)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .clickCursor()
+                        }
+                    }
+                    .padding(4)
+                }
+            }
+            // Line 2: quiet metadata cluster — a single 10pt style, semantic color only
+            // where it's a signal. Only rendered when something is present.
+            if showsMeta(risk) {
+                HStack(spacing: 8) {
+                    // Running: a green dot + count. No "running" copy — in context the
+                    // green dot is the signal.
                     if group.running > 0 {
-                        Text("\(group.running) running")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.green)
+                        HStack(spacing: 3) {
+                            Circle().fill(Color.green).frame(width: 6, height: 6)
+                            Text("\(group.running)")
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.green)
+                        }
+                        .help("\(group.running) running session(s)")
                     }
                     // Unread roll-up: a red dot + count when any session in this project
                     // has a pending turn-end notification, so a collapsed folder still
@@ -886,7 +956,6 @@ private struct FolderHeader: View {
                     // yellow pencil = the main checkout itself holds uncommitted/unpushed
                     // work (count: dirty files + unpushed commits); orange warning = how
                     // many distinct WORKTREES hold at-risk work.
-                    let risk = atRiskRoots
                     if let main = risk.main {
                         HStack(spacing: 3) {
                             Image(systemName: "pencil.circle.fill")
@@ -907,49 +976,12 @@ private struct FolderHeader: View {
                         .foregroundStyle(.orange)
                         .help("\(risk.worktrees) worktree(s) here with uncommitted or unpushed work")
                     }
-                    Spacer(minLength: 8)
+                    Spacer(minLength: 0)
+                    FolderIssues(cwd: group.cwd)
+                    FolderPrs(cwd: group.cwd)
                 }
-                .contentShape(Rectangle())
+                .padding(.leading, 15) // align under the name, past the chevron
             }
-            .buttonStyle(.plain)
-            .clickCursor()
-            // A popover (not a native Menu) so each agent option is a real SwiftUI
-            // button: it gets the pointing-hand cursor + hover highlight, and clicks
-            // register reliably (native menu rows did neither).
-            Button { showingAgentPicker = true } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.appHairline(plusHovering ? 0.14 : 0)))
-            }
-            .buttonStyle(.plain)
-            .help("New session in \(group.cwd)")
-            .clickCursor()
-            .onHover { plusHovering = $0 }
-            .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(ProviderId.allCases, id: \.self) { p in
-                        Button {
-                            model.createInFolder(provider: p, cwd: group.cwd)
-                            showingAgentPicker = false
-                        } label: {
-                            Text(Providers.spec(for: p).label)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .clickCursor()
-                    }
-                }
-                .padding(4)
-            }
-            FolderIssues(cwd: group.cwd)
-            FolderPrs(cwd: group.cwd)
         }
         // Give each project a distinct, rounded bar: a subtle raised fill for contrast
         // against the session rows. Slight horizontal inset so the rounded corners read.
