@@ -1739,10 +1739,8 @@ struct SessionContainer: View {
                 .help(model.bottomTerminalShown ? "Hide the terminal panel (⌃T)" : "Show the terminal panel (⌃T)")
                 .clickCursor()
                 Button {
-                    // Panel transition: the terminal coordinators must hold the
-                    // intermediate grids this relayout produces and settle once
-                    // with a forced repaint (juancode-1th.2).
-                    LayoutTransitionGate.shared.begin()
+                    // The panel floats over the terminal (see the overlay below), so
+                    // toggling it never relayouts the terminal — no transition gate.
                     panelShown.toggle()
                 } label: {
                     Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
@@ -1752,37 +1750,46 @@ struct SessionContainer: View {
             }
             .padding(8)
             Divider()
-            HStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    terminal
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if model.bottomTerminalShown {
-                        // previewOnly: this divider borders the live terminal panes
-                        // (main + bottom). Committing the size live reflows the CLI's
-                        // TUI on every drag frame, interleaving partial redraws into the
-                        // scrollback buffer permanently. Preview the edge during the drag
-                        // and resize once on release for a single clean repaint.
-                        DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720,
-                                         previewOnly: true)
-                        BottomTerminalPanel(cwd: meta.cwd)
-                            .frame(height: CGFloat(bottomHeight))
-                    }
-                }
-                // Breathing room so the terminal isn't glued to the divider/side panel.
-                .padding(.leading, 10)
-                .padding(.trailing, panelShown ? 10 : 0)
-                .padding(.top, 6)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if panelShown {
-                    // previewOnly: see the bottom-handle note above — this divider
-                    // resizes the live terminal too, so commit once on release.
-                    DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: .infinity,
+            VStack(spacing: 0) {
+                terminal
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if model.bottomTerminalShown {
+                    // previewOnly: this divider borders the live terminal panes
+                    // (main + bottom). Committing the size live reflows the CLI's
+                    // TUI on every drag frame, interleaving partial redraws into the
+                    // scrollback buffer permanently. Preview the edge during the drag
+                    // and resize once on release for a single clean repaint.
+                    DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720,
                                      previewOnly: true)
-                    sidePanel
-                        .frame(width: CGFloat(panelWidth))
+                    BottomTerminalPanel(cwd: meta.cwd)
+                        .frame(height: CGFloat(bottomHeight))
                 }
             }
+            // Breathing room so the terminal isn't glued to the window edges. Constant
+            // on both sides: nothing about the side panel's visibility may change the
+            // terminal's layout (see the overlay note below).
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The Changes/Issues panel floats OVER the terminal instead of splitting
+            // the space with it. Squeezing the terminal ~400pt narrower rewraps the
+            // whole scrollback and forces the CLI's TUI to redraw across a huge width
+            // jump — no SIGWINCH choreography made that clean (juancode-1th.2,
+            // juancode-qxb). Overlaying keeps the pty grid untouched, so toggling or
+            // drag-resizing the panel can never disturb the terminal render.
+            .overlay(alignment: .trailing) {
+                if panelShown {
+                    HStack(spacing: 0) {
+                        // Live resize is fine here: the drag moves only the floating
+                        // panel's edge, never the terminal grid.
+                        DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: .infinity)
+                        sidePanel
+                            .frame(width: CGFloat(panelWidth))
+                    }
+                    .background(Color.appPanel)
+                    .shadow(color: .black.opacity(0.45), radius: 14, x: -6, y: 0)
+                }
+            }
         }
         .navigationTitle(meta.title)
         .perfTrackBody()
@@ -1813,7 +1820,6 @@ struct SessionContainer: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.appSurface)
     }
 
     @ViewBuilder
