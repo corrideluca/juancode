@@ -811,6 +811,33 @@ final class AppModel {
         }
     }
 
+    // MARK: - Per-folder / per-worktree branch (sidebar labels)
+
+    /// Working-tree git state keyed by folder cwd, backing the sidebar's project
+    /// branch label (main checkout) and the worktree-session row branch. Distinct
+    /// from `gitStateBySession` (keyed by session id, loaded by the ChangesPanel):
+    /// this one is cheap, folder-scoped, and refreshed on header/row appear.
+    var gitStateByCwd: [String: GitState] = [:]
+    /// cwds with a folder git-state fetch in flight, so appears don't stampede.
+    private var gitStateCwdLoading: Set<String> = []
+
+    /// The cached branch/state for `cwd`, if loaded yet.
+    func folderGitState(_ cwd: String) -> GitState? { gitStateByCwd[cwd] }
+
+    /// Load (or refresh) the git state for `cwd` via `getGitState` (a light
+    /// `symbolic-ref` shell-out). Runs off the main actor; coalesces concurrent
+    /// calls. Non-git folders resolve to `git: false` (branch nil), so the label
+    /// just stays hidden. Mirrors `loadPrs`/`loadBeads`.
+    func loadFolderGitState(_ cwd: String) {
+        guard !gitStateCwdLoading.contains(cwd) else { return }
+        gitStateCwdLoading.insert(cwd)
+        Task {
+            let state = await Task.detached(priority: .utility) { await getGitState(cwd) }.value
+            gitStateByCwd[cwd] = state
+            gitStateCwdLoading.remove(cwd)
+        }
+    }
+
     /// "Work on" a bd issue: compose `Work on <id>: <title>\n\n<description>` and
     /// inject it into the focused/live session as if typed. The issue's status is
     /// left untouched (side-effect-free, per juancode-sfh).

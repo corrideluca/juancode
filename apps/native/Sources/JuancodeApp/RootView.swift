@@ -723,6 +723,7 @@ struct SidebarView: View {
             // A minimal hairline between session rows for visual separation.
             .listRowSeparator(.visible)
             .listRowSeparatorTint(Color.appHairline(0.12))
+            .onAppear { if meta.worktreePath != nil { model.loadFolderGitState(meta.cwd) } }
             .contextMenu { rowContextMenu(meta) }
         // Pointing-hand on hover for the clickable (selectable) rows; external
         // rows aren't selectable, so they keep the default cursor.
@@ -742,6 +743,7 @@ struct SidebarView: View {
             .clipShape(RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
             .onTapGesture { if !external { model.selection = meta.id } }
+            .onAppear { if meta.worktreePath != nil { model.loadFolderGitState(meta.cwd) } }
             .contextMenu { rowContextMenu(meta) }
         // Pointing-hand on hover for the clickable rows; external rows can't be
         // selected by tap, so they keep the default cursor.
@@ -756,6 +758,7 @@ struct SidebarView: View {
                           trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
                           unread: model.unreadSessions.contains(meta.id),
                           atRisk: !external && model.workAtRisk(forSession: meta) != nil,
+                          worktreeBranch: meta.worktreePath != nil ? model.folderGitState(meta.cwd)?.branch : nil,
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
                           selected: model.selection == meta.id)
     }
@@ -943,6 +946,18 @@ private struct FolderHeader: View {
             // where it's a signal. Only rendered when something is present.
             if showsMeta(risk) {
                 HStack(spacing: 8) {
+                    // Current branch on the main checkout — the project-level "where am
+                    // I" signal. Leads the line; hidden on a detached HEAD / non-git dir.
+                    if let branch = model.folderGitState(group.cwd)?.branch {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.triangle.branch").font(.system(size: 9))
+                            Text(branch)
+                                .font(.system(size: 10, weight: .medium).monospaced())
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(.secondary)
+                        .help("Current branch on the main checkout")
+                    }
                     // Running: a green dot + count. No "running" copy — in context the
                     // green dot is the signal.
                     if group.running > 0 {
@@ -1026,7 +1041,7 @@ private struct FolderHeader: View {
                  ? "\(running) of these are still running. This stops every agent here and removes the sessions."
                  : "This removes every session in this project.")
         }
-        .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd) }
+        .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
 }
 
@@ -1466,6 +1481,11 @@ struct SessionRow: View {
     /// This session's folder holds uncommitted/unpushed work (juancode-rxu) — shows
     /// a small warning capsule on the trailing edge.
     var atRisk: Bool = false
+    /// Branch this session's worktree is on, when it runs in a juancode-owned git
+    /// worktree (`meta.worktreePath != nil`). Drives the branch label + glyph in the
+    /// subtitle so worktree rows read distinctly from main-checkout rows. Nil for
+    /// non-worktree sessions or until the branch is loaded.
+    var worktreeBranch: String? = nil
     /// Resume action for an external row; the row is otherwise non-interactive.
     var onResume: (() -> Void)? = nil
     /// Whether this row is the current selection — drives showing the external
@@ -1483,8 +1503,16 @@ struct SessionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(meta.title).lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    .help(usageHelp)
+                HStack(spacing: 3) {
+                    // A branch glyph marks a worktree session — the fastest way to tell
+                    // it apart from a main-checkout row (which shows the project name).
+                    if isWorktree {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                    Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .help(usageHelp)
             }
             Spacer(minLength: 6)
             trailingOrnament
@@ -1562,10 +1590,15 @@ struct SessionRow: View {
     }
     private var showIssue: Bool { trackedIssue != nil && !showPr }
 
+    private var isWorktree: Bool { meta.worktreePath != nil }
+
     private var subtitle: String {
-        let folder = (meta.cwd as NSString).lastPathComponent
-        if let label = meta.usage?.badgeLabel { return "\(folder) · \(label)" }
-        return folder
+        // Worktree rows show the branch (e.g. `juancode/48e86fc1`) rather than the
+        // worktree dir's bare hash, so the row reads meaningfully. Falls back to the
+        // dir name until the branch loads (or on a detached HEAD).
+        let base = (isWorktree ? worktreeBranch : nil) ?? (meta.cwd as NSString).lastPathComponent
+        if let label = meta.usage?.badgeLabel { return "\(base) · \(label)" }
+        return base
     }
 
     /// Detailed usage breakdown for the subtitle tooltip (was the trailing badge's
