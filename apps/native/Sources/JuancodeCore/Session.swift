@@ -35,6 +35,18 @@ public struct SessionEnvironment: Sendable {
     /// Read the CLI transcript's token usage. Injected from `JuancodeServices`
     /// (`deriveSessionUsage`); defaults to nil. `(provider, cliSessionId) -> usage?`.
     public var deriveUsage: @Sendable (_ provider: ProviderId, _ cliSessionId: String) async -> SessionUsage?
+    /// Start tailing the CLI's stream-json transcript for structured activity pulses
+    /// (juancode-1c9), the preferred wording-independent busy/idle signal. Injected
+    /// from `JuancodeServices` so the core stays dependency-free; the default is a
+    /// no-op (screen-only detection, e.g. in tests). The session passes a *getter* for
+    /// the CLI session id (Codex discovers it after spawn) and an `onBatch` callback
+    /// receiving each parsed batch of transcript kinds plus a `reset` flag (true for
+    /// the one-shot backlog). Returns a stop handle the session calls on exit/kill.
+    public var startActivityTail: @Sendable (
+        _ provider: ProviderId,
+        _ cliSessionId: @escaping @Sendable () -> String?,
+        _ onBatch: @escaping @Sendable (_ kinds: [StructuredEventKind], _ reset: Bool) -> Void
+    ) -> (@Sendable () -> Void)
 
     public init(
         resolver: BinaryResolver = DefaultBinaryResolver(),
@@ -45,7 +57,12 @@ public struct SessionEnvironment: Sendable {
             await CodexSessionDiscovery.capture(cwd: $0, sinceMs: $1)
         },
         deriveTitle: @escaping @Sendable (ProviderId, String) async -> String? = { _, _ in nil },
-        deriveUsage: @escaping @Sendable (ProviderId, String) async -> SessionUsage? = { _, _ in nil }
+        deriveUsage: @escaping @Sendable (ProviderId, String) async -> SessionUsage? = { _, _ in nil },
+        startActivityTail: @escaping @Sendable (
+            ProviderId,
+            @escaping @Sendable () -> String?,
+            @escaping @Sendable ([StructuredEventKind], Bool) -> Void
+        ) -> (@Sendable () -> Void) = { _, _, _ in {} }
     ) {
         self.resolver = resolver
         self.store = store
@@ -54,6 +71,7 @@ public struct SessionEnvironment: Sendable {
         self.discoverCodexId = discoverCodexId
         self.deriveTitle = deriveTitle
         self.deriveUsage = deriveUsage
+        self.startActivityTail = startActivityTail
     }
 }
 
@@ -105,6 +123,11 @@ public final class Session: @unchecked Sendable {
 
     private let titlePollMs = 4000
     private var titleTimer: DispatchSourceTimer?
+
+    /// Stop handle for the structured-transcript activity tail (juancode-1c9),
+    /// started at spawn and invoked on exit/kill. Guarded by `lock`; nil-ed after
+    /// the first stop so it runs at most once.
+    private var stopActivityTail: (@Sendable () -> Void)?
 
     /// Set once the user renames the session manually, so the CLI-derived title
     /// poll stops clobbering their chosen name.
@@ -219,6 +242,29 @@ public final class Session: @unchecked Sendable {
 
         // Keep the title + usage in sync with the CLI's own transcript.
         startTitleWatch()
+        // Preferred activity signal: pulse the detector busy on each batch of agent
+        // records the CLI appends to its transcript. The id is read via a getter so
+        // Codex (which discovers its id after spawn) starts tailing once it lands. The
+        // backlog (`reset: true`) is skipped so a resumed session's replayed prior turns
+        // don't spuriously pulse busy at startup — only newly appended records count.
+        let stop = env.startActivityTail(
+            meta.provider,
+            { [weak self] in self?.meta.cliSessionId },
+            { [weak self] kinds, reset in
+                if !reset { self?.detector.feedStructured(kinds) }
+            }
+        )
+        lock.withLock { stopActivityTail = stop }
+    }
+
+    /// Invoke and clear the activity-tail stop handle (idempotent).
+    private func stopActivityTailIfNeeded() {
+        let stop = lock.withLock { () -> (@Sendable () -> Void)? in
+            let s = stopActivityTail
+            stopActivityTail = nil
+            return s
+        }
+        stop?()
     }
 
     // MARK: - pty callbacks (on workQueue)
@@ -238,6 +284,7 @@ public final class Session: @unchecked Sendable {
         }
         detector.reset()
         stopTitleWatch()
+        stopActivityTailIfNeeded()
         // One last transcript read to catch a late-generated title / final usage.
         refreshTitleAndUsage()
         persistNow()
@@ -527,6 +574,7 @@ public final class Session: @unchecked Sendable {
 
     public func kill() {
         stopTitleWatch()
+        stopActivityTailIfNeeded()
         if isRunning { proc?.terminate() }
     }
 

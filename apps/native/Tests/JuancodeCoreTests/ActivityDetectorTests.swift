@@ -130,4 +130,148 @@ import Testing
         #expect(c.snapshot.last?.0 == .idle)
         #expect(c.snapshot.last?.1 == false)
     }
+
+    // ── Structured stream-json signal (juancode-1c9 / doq) ────────────────────
+
+    @Test func goesBusyOnAgentStructuredEventWithNoFooter() async {
+        // No "esc to interrupt" text anywhere — the screen path can't see this; the
+        // structured pulse is what makes us busy. This is the robustness win.
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feedStructured([.assistant])
+        await poll { c.snapshot.contains { $0.0 == .busy } }
+        #expect(c.states == [.busy])
+    }
+
+    @Test func treatsAgentKindsAsActivity() async {
+        for kind in [StructuredEventKind.thinking, .toolUse, .toolResult] {
+            let c = Collector()
+            let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+            det.feedStructured([kind])
+            await poll { c.snapshot.contains { $0.0 == .busy } }
+            #expect(c.snapshot.contains { $0.0 == .busy }, "should go busy on: \(kind)")
+        }
+    }
+
+    @Test func doesNotGoBusyOnLoneUserEvent() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feedStructured([.user]) // the user's own prompt landing — not agent work
+        await sleepMs(200)
+        #expect(c.snapshot.isEmpty)
+    }
+
+    @Test func settlesStructuredTurnToIdleWhenQuiet() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feedStructured([.assistant])
+        await poll { c.snapshot.last?.0 == .idle }
+        #expect(c.snapshot.map { [$0.0.rawValue, "\($0.1)"] }
+            == [["busy", "false"], ["idle", "true"]])
+    }
+
+    @Test func settlesStructuredTurnToWaitingInputWhenScreenShowsPrompt() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feedStructured([.toolUse])
+        // The permission prompt is rendered to the screen but not (yet) the transcript.
+        det.feed("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n")
+        await poll { c.snapshot.last?.0 == .waitingInput }
+        #expect(c.snapshot.last?.0 == .waitingInput)
+        #expect(c.snapshot.last?.1 == true)
+    }
+
+    /// The transcript says the agent stopped; the CLI just hasn't erased the footer
+    /// yet. The structured path must not pin us busy on a stale footer.
+    @Test func structuredTurnSettlesOnQuietDespiteLingeringFooter() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feed("✻ Working… (esc to interrupt)")   // footer visible
+        det.feedStructured([.assistant])             // upgrades the turn to structured
+        await poll { c.snapshot.last?.0 == .idle }
+        #expect(c.snapshot.last?.0 == .idle)
+    }
+
+    @Test func structuredPulseReArmsSettleWindow() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 120) { c.record($0, $1) }
+        det.feedStructured([.toolUse])
+        await sleepMs(60)                 // under settleMs
+        det.feedStructured([.toolResult]) // re-arms before settle fires
+        await sleepMs(60)
+        #expect(c.states == [.busy])      // never settled early
+        await poll { c.snapshot.last?.0 == .idle }
+        #expect(c.snapshot.last?.0 == .idle)
+    }
+
+    @Test func batchHasAgentActivityDistinguishesUser() {
+        #expect(batchHasAgentActivity([.user, .assistant]))
+        #expect(batchHasAgentActivity([.toolUse]))
+        #expect(!batchHasAgentActivity([]))
+        #expect(!batchHasAgentActivity([.user]))
+    }
+
+    // ── idle → waitingInput without a preceding turn (juancode-8w5) ───────────
+
+    /// Push `text` into the bottom region by prefixing enough blank rows.
+    private func atBottom(_ text: String) -> String { Self.clear + String(repeating: "\n", count: 30) + text }
+
+    @Test func promotesIdleToWaitingOnFolderTrustDialog() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feed(atBottom("Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit\n"))
+        await poll { c.snapshot.last?.0 == .waitingInput }
+        #expect(c.snapshot.last?.0 == .waitingInput)
+        #expect(c.snapshot.last?.1 == true)
+        #expect(det.lastPromptMatch == "select-cursor")
+    }
+
+    @Test func promotesIdleToWaitingOnYesNoPrompt() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feed(atBottom("Overwrite the file? (y/n)"))
+        await poll { c.snapshot.last?.0 == .waitingInput }
+        #expect(c.snapshot.last?.0 == .waitingInput)
+        #expect(det.lastPromptMatch == "yn-paren")
+    }
+
+    @Test func ignoresStartupBannerNoPrompt() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feed(Self.clear + "✻ Welcome to Claude Code!\n\n  /help for help\n\n> ")
+        await sleepMs(200)
+        #expect(c.snapshot.isEmpty)
+        #expect(det.activity == .idle)
+    }
+
+    @Test func doesNotTriggerOnScrolledUpDoYouWant() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        // Prose at the top; the bottom region (where a live prompt would be) is blank.
+        det.feed(Self.clear + "Earlier I asked: Do you want to refactor this?\n" + String(repeating: "\n", count: 35))
+        await sleepMs(200)
+        #expect(c.snapshot.isEmpty)
+        #expect(det.activity == .idle)
+    }
+
+    @Test func clearsWaitingBackToIdleWhenAnswered() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feed(atBottom("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"))
+        await poll { c.snapshot.last?.0 == .waitingInput }
+        // The menu is torn down and replaced with a plain result — no marker left.
+        det.feed(Self.clear + "Done.\n")
+        await poll { c.snapshot.last?.0 == .idle }
+        #expect(c.snapshot.last?.0 == .idle)
+        #expect(c.snapshot.last?.1 == false)
+    }
+
+    @Test func noFlickerDuringOrdinaryStreaming() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        // Idle output that contains a '?' but no prompt in the bottom region.
+        det.feed(Self.clear + "The answer to your question is 42.\n" + String(repeating: "\n", count: 35))
+        await sleepMs(200)
+        #expect(c.snapshot.isEmpty)
+    }
 }

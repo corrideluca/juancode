@@ -37,12 +37,27 @@ import { parsePrompt } from "./promptParse.ts";
  * neither — are never mistaken for agent activity. Best-effort: with no
  * transcript, a CLI footer-wording change can still defeat the screen patterns,
  * which is exactly why the structured path exists.
+ *
+ * A prompt can also appear *without* any preceding turn — a startup folder-trust
+ * dialog, an auth prompt, or a resumed session re-rendering its pending permission
+ * menu. Those would otherwise read as idle (green dot, no notification) while the
+ * session is really blocked on the user, so the screen path also promotes
+ * **idle → waiting_input** when a prompt marker settles into the bottom region
+ * (juancode-8w5), and demotes it back to idle once the prompt is answered away.
  */
 
 /** Quiet period after a busy pulse before we re-classify the screen. */
 const SETTLE_MS = 250;
 /** Longer silence after which a still-"busy" session is treated as stale. */
 const WATCHDOG_MS = 8000;
+
+/**
+ * Rows of the bottom screen region treated as the footer / input / dialog area.
+ * The prose-like prompt markers ({@link PROMPT_PATTERNS} `bottomOnly`) are only
+ * matched here so the same words scrolled up in conversation history don't
+ * masquerade as a live prompt (juancode-8w5).
+ */
+const PROMPT_REGION_ROWS = 20;
 
 /** The "esc to interrupt" working line, tolerant of wording ("Esc again to…"). */
 const WORKING_RE = /\besc(?:ape)?\b[^\n]{0,40}\binterrupt\b/i;
@@ -51,18 +66,40 @@ const WORKING_RE = /\besc(?:ape)?\b[^\n]{0,40}\binterrupt\b/i;
 const WS_RE = /[^\S\n]{2,}/g;
 
 /**
- * Markers that a settled screen is an interactive question awaiting a choice
- * rather than a completed turn. The `❯ 1.` cursor is Claude/Codex's own
- * selection UI (prose lists never carry it); the rest catch plain prompts.
+ * A prompt marker with the region it is trusted in. The `❯ 1.` selection cursor
+ * is Claude/Codex's own menu UI — it never appears in prose, so it is matched
+ * across the whole screen (a centered trust/permission dialog paints its cursor
+ * above any fixed bottom band). The prose-like markers ("Do you want to",
+ * "Proceed?", trust wording, y/n footers, "Press Enter to continue") could plausibly
+ * appear as ordinary text scrolled up in history, so they are trusted only in the
+ * bottom region. `label` is surfaced via {@link ActivityDetector.lastPromptMatch}
+ * for debugging which shape tripped the classification.
  */
-const PROMPT_RES: readonly RegExp[] = [
-  /❯\s*\d+\.\s/, // selection cursor on a numbered option (permission menus)
-  /\bDo you want to\b/i,
-  /\bProceed\?/i,
-  /\(y\/n\)/i,
-  /\[y\/n\]/i,
-  /\bAllow\b[^\n]{0,40}\?/i,
+interface PromptPattern {
+  readonly label: string;
+  readonly re: RegExp;
+  readonly bottomOnly: boolean;
+}
+
+const PROMPT_PATTERNS: readonly PromptPattern[] = [
+  { label: "select-cursor", re: /❯\s*\d+\.\s/, bottomOnly: false }, // permission / option menus
+  { label: "do-you-want", re: /\bDo you want to\b/i, bottomOnly: true },
+  { label: "do-you-trust", re: /\bDo you trust\b/i, bottomOnly: true }, // startup folder-trust dialog
+  { label: "proceed", re: /\bProceed\?/i, bottomOnly: true },
+  { label: "allow", re: /\bAllow\b[^\n]{0,40}\?/i, bottomOnly: true },
+  { label: "yn-paren", re: /\(y\/n\)/i, bottomOnly: true },
+  { label: "yn-bracket", re: /\[y\/n\]/i, bottomOnly: true },
+  { label: "press-enter", re: /\bPress Enter to continue\b/i, bottomOnly: true },
+  { label: "esc-cancel", re: /\(esc to cancel\)/i, bottomOnly: true }, // interactive selection footer
 ];
+
+/**
+ * Cheap lowercase substrings that gate the idle→waiting re-read: only a frame
+ * whose bytes could carry (part of) a prompt marker is worth re-scanning the
+ * screen for. A false positive here just costs one wasted regex pass on settle;
+ * it never on its own changes state.
+ */
+const PROMPT_GATE: readonly string[] = ["?", "❯", "y/n", "trust", "continue", "esc to cancel"];
 
 /**
  * Structured-event kinds that mean the agent is actively producing a turn. A
@@ -90,6 +127,10 @@ export class ActivityDetector {
   private readonly screen: TerminalScreen;
   private settleTimer: NodeJS.Timeout | null = null;
   private watchdogTimer: NodeJS.Timeout | null = null;
+  /** Settle timer for the idle→waiting_input prompt re-read (juancode-8w5). */
+  private promptTimer: NodeJS.Timeout | null = null;
+  /** Label of the last {@link PROMPT_PATTERNS} entry that matched, for debugging. */
+  private lastMatchedPrompt: string | null = null;
   /**
    * Whether the *current* busy turn was started by a structured agent event.
    * When true we don't keep the turn busy just because the footer regex still
@@ -114,17 +155,25 @@ export class ActivityDetector {
     if (this.state === "busy") {
       // Already working: any output (re)starts the settle/watchdog clocks.
       this.armTimers();
-    } else if (data.toLowerCase().includes("interrupt")) {
+      return;
+    }
+    const lower = data.toLowerCase();
+    if (lower.includes("interrupt") && WORKING_RE.test(this.normalizedScreen())) {
       // Cheap gate: only a frame that could carry the working footer is worth
       // re-reading the screen for. If the footer is now visible we go busy.
-      if (WORKING_RE.test(this.normalizedScreen())) {
-        this.structuredTurn = false;
-        this.transition("busy", false);
-        this.armTimers();
-      }
+      this.structuredTurn = false;
+      this.transition("busy", false);
+      this.armTimers();
+      return;
     }
-    // Idle with no possible footer: nothing to do (don't reclassify idle output
-    // into waiting_input — active states are only entered via a working turn).
+    // Idle/waiting: a prompt can appear with no preceding working turn — a startup
+    // folder-trust dialog, an auth prompt, a resumed session's pending permission
+    // menu (juancode-8w5). Gate on cheap markers, then re-read on settle. While
+    // already waiting we re-check on *any* output, since the answer that clears the
+    // menu carries no marker of its own.
+    if (this.state === "waiting_input" || PROMPT_GATE.some((s) => lower.includes(s))) {
+      this.armPromptTimer();
+    }
   }
 
   /**
@@ -145,6 +194,11 @@ export class ActivityDetector {
 
   get activity(): SessionActivity {
     return this.state;
+  }
+
+  /** Which {@link PROMPT_PATTERNS} label last classified a screen as a prompt, for debugging. */
+  get lastPromptMatch(): string | null {
+    return this.lastMatchedPrompt;
   }
 
   /**
@@ -208,6 +262,35 @@ export class ActivityDetector {
   }
 
   /**
+   * (Re)arm the idle→waiting settle. Independent of the busy settle/watchdog: it
+   * only ever runs while we're *not* busy, and re-reads the screen for a prompt
+   * after the quiet window (juancode-8w5).
+   */
+  private armPromptTimer(): void {
+    if (this.promptTimer) clearTimeout(this.promptTimer);
+    this.promptTimer = setTimeout(() => {
+      this.promptTimer = null;
+      this.settlePrompt();
+    }, SETTLE_MS);
+  }
+
+  /**
+   * Re-classify a non-busy screen: a prompt in the trusted region enters
+   * waiting_input (notify), and a prompt that has since cleared demotes a stale
+   * waiting_input back to idle. Never touches a busy turn (that's {@link settle}).
+   */
+  private settlePrompt(): void {
+    if (this.state !== "idle" && this.state !== "waiting_input") return;
+    const match = this.matchPrompt();
+    if (match) {
+      if (this.state !== "waiting_input") this.transition("waiting_input", true);
+    } else if (this.state === "waiting_input") {
+      // The prompt was answered / repainted away — back to idle (no ding).
+      this.transition("idle", false);
+    }
+  }
+
+  /**
    * Re-read the screen and classify. Only meaningful while busy: it ends a turn.
    * `demoteStaleFooter` (the watchdog path) ignores a lingering footer and settles
    * anyway, so we never hang on busy after both streams have gone silent.
@@ -219,15 +302,31 @@ export class ActivityDetector {
    */
   private settle(demoteStaleFooter: boolean): void {
     if (this.state !== "busy") return;
-    const text = this.normalizedScreen();
-    let next: SessionActivity;
-    if (!demoteStaleFooter && !this.structuredTurn && WORKING_RE.test(text)) {
-      next = "busy"; // still working (screen path) — leave it
-    } else {
-      next = PROMPT_RES.some((re) => re.test(text)) ? "waiting_input" : "idle";
+    if (!demoteStaleFooter && !this.structuredTurn && WORKING_RE.test(this.normalizedScreen())) {
+      return; // still working (screen path) — leave it busy
     }
+    const next: SessionActivity = this.matchPrompt() ? "waiting_input" : "idle";
     // We're leaving busy on a real turn boundary, so notify.
-    this.transition(next, next !== "busy");
+    this.transition(next, true);
+  }
+
+  /**
+   * The label of the first {@link PROMPT_PATTERNS} entry visible on the settled
+   * screen, or null. Full-screen markers (the selection cursor) are matched
+   * everywhere; prose-like markers only in the bottom region. Records the hit in
+   * {@link lastMatchedPrompt} for debugging.
+   */
+  private matchPrompt(): string | null {
+    const full = this.normalizedScreen();
+    const bottom = this.normalizedBottom();
+    for (const p of PROMPT_PATTERNS) {
+      if (p.re.test(p.bottomOnly ? bottom : full)) {
+        this.lastMatchedPrompt = p.label;
+        return p.label;
+      }
+    }
+    this.lastMatchedPrompt = null;
+    return null;
   }
 
   private transition(state: SessionActivity, notify: boolean): void {
@@ -247,6 +346,11 @@ export class ActivityDetector {
     return this.screen.visibleText.replace(WS_RE, " ");
   }
 
+  /** The bottom {@link PROMPT_REGION_ROWS} rows, whitespace-collapsed like {@link normalizedScreen}. */
+  private normalizedBottom(): string {
+    return this.screen.bottomText(PROMPT_REGION_ROWS).replace(WS_RE, " ");
+  }
+
   private clearTimers(): void {
     if (this.settleTimer) {
       clearTimeout(this.settleTimer);
@@ -255,6 +359,10 @@ export class ActivityDetector {
     if (this.watchdogTimer) {
       clearTimeout(this.watchdogTimer);
       this.watchdogTimer = null;
+    }
+    if (this.promptTimer) {
+      clearTimeout(this.promptTimer);
+      this.promptTimer = null;
     }
   }
 }

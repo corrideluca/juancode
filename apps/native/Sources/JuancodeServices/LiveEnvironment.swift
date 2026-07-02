@@ -18,7 +18,16 @@ public extension SessionEnvironment {
             messageQueue: messageQueue,
             scrollbackLimit: scrollbackLimit,
             deriveTitle: { provider, id in await deriveSessionTitle(provider, id) },
-            deriveUsage: { provider, id in await deriveSessionUsage(provider, id) }
+            deriveUsage: { provider, id in await deriveSessionUsage(provider, id) },
+            startActivityTail: { provider, getId, onBatch in
+                let tail = TranscriptActivityTail(
+                    provider: provider,
+                    cliSessionId: getId,
+                    listener: onBatch
+                )
+                tail.start()
+                return { tail.stop() }
+            }
         )
     }
 }

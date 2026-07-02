@@ -160,6 +160,58 @@ describe("ActivityDetector", () => {
     vi.advanceTimersByTime(SETTLE);
     expect(events.at(-1)).toEqual({ state: "idle", notify: true });
   });
+
+  // ── idle → waiting_input without a preceding turn (juancode-8w5) ──────────
+
+  /** Push `text` into the bottom region by prefixing enough blank rows. */
+  const atBottom = (text: string) => `${CLEAR}${"\n".repeat(30)}${text}`;
+
+  it("promotes idle→waiting_input on a folder-trust dialog with no working turn", () => {
+    det.feed(atBottom("Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit\n"));
+    vi.advanceTimersByTime(SETTLE);
+    expect(events.at(-1)).toEqual({ state: "waiting_input", notify: true });
+    expect(det.lastPromptMatch).toBe("select-cursor");
+  });
+
+  it("promotes idle→waiting_input on a y/n prompt with no selection cursor", () => {
+    det.feed(atBottom("Overwrite the file? (y/n)"));
+    vi.advanceTimersByTime(SETTLE);
+    expect(events.at(-1)).toEqual({ state: "waiting_input", notify: true });
+    expect(det.lastPromptMatch).toBe("yn-paren");
+  });
+
+  it("ignores the startup banner (no prompt marker)", () => {
+    det.feed(`${CLEAR}✻ Welcome to Claude Code!\n\n  /help for help\n\n> `);
+    vi.advanceTimersByTime(SETTLE);
+    expect(events).toEqual([]);
+    expect(det.activity).toBe("idle");
+  });
+
+  it("does not trigger on 'Do you want to' scrolled up in history", () => {
+    // The prose sits at the top; the bottom region (where a live prompt would be)
+    // is blank, so the bottom-only marker must not match.
+    det.feed(`${CLEAR}Earlier I asked: Do you want to refactor this?\n${"\n".repeat(35)}`);
+    vi.advanceTimersByTime(SETTLE);
+    expect(events).toEqual([]);
+    expect(det.activity).toBe("idle");
+  });
+
+  it("clears waiting_input back to idle when the prompt is answered away", () => {
+    det.feed(atBottom("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"));
+    vi.advanceTimersByTime(SETTLE);
+    expect(det.activity).toBe("waiting_input");
+    // The menu is torn down and replaced with a plain result — no marker left.
+    det.feed(`${CLEAR}Done.\n`);
+    vi.advanceTimersByTime(SETTLE);
+    expect(events.at(-1)).toEqual({ state: "idle", notify: false });
+  });
+
+  it("does not flicker to waiting_input during ordinary streaming output", () => {
+    // Idle output that happens to contain a '?' but no prompt in the bottom region.
+    det.feed(`${CLEAR}The answer to your question is 42.\n${"\n".repeat(35)}`);
+    vi.advanceTimersByTime(SETTLE);
+    expect(events).toEqual([]);
+  });
 });
 
 describe("batchHasAgentActivity", () => {
