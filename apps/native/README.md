@@ -215,3 +215,8 @@ cd apps/native
 It uses the existing `gh` login. Google calendars are read through macOS Calendar,
 so connect the Google account in System Settings first. Extra repositories whose
 Actions should always be watched can be added in the app's Settings.
+
+The compact next-meeting/timeline presentation is informed by MeetingBar
+(Apache-2.0), and the keyboard-capable utility-window behavior by
+DSFQuickActionBar (MIT). Corri Assistant keeps its implementation local and does
+not add either project as a runtime dependency.

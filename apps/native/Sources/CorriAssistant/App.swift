@@ -1,6 +1,15 @@
 import AppKit
 import SwiftUI
 
+private final class AssistantPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func cancelOperation(_ sender: Any?) {
+        orderOut(sender)
+    }
+}
+
 @main
 @MainActor
 final class CorriAssistantApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -24,7 +33,7 @@ final class CorriAssistantApp: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func createPanel() {
-        let panel = NSPanel(
+        let panel = AssistantPanel(
             contentRect: NSRect(x: 0, y: 0, width: 410, height: 760),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .utilityWindow],
             backing: .buffered, defer: false)
@@ -42,6 +51,7 @@ final class CorriAssistantApp: NSObject, NSApplicationDelegate, NSWindowDelegate
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.minSize = NSSize(width: 360, height: 520)
         panel.delegate = self
+        panel.setFrameAutosaveName("CorriAssistantPanel")
         panel.contentView = NSHostingView(rootView: DashboardView(model: model))
         self.panel = panel
     }
@@ -69,8 +79,12 @@ final class CorriAssistantApp: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     private func showPanel() {
         guard let panel else { return }
-        positionAtRightEdge(panel)
+        if !UserDefaults.standard.bool(forKey: "NSWindow Frame CorriAssistantPanel.positioned") {
+            positionAtRightEdge(panel)
+            UserDefaults.standard.set(true, forKey: "NSWindow Frame CorriAssistantPanel.positioned")
+        }
         panel.orderFrontRegardless()
+        panel.makeKey()
         NSApp.activate(ignoringOtherApps: true)
     }
 

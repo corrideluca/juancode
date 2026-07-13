@@ -48,6 +48,8 @@ struct CalendarItem: Identifiable, Equatable, Sendable {
     let end: Date
     let isAllDay: Bool
     let url: URL?
+    let meetingURL: URL?
+    let location: String
 }
 
 struct ChatMessage: Identifiable, Equatable, Sendable {

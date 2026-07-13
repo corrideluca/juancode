@@ -4,6 +4,7 @@ import SwiftUI
 struct DashboardView: View {
     @Bindable var model: AssistantModel
     @State private var showingSettings = false
+    @State private var workFilter = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,25 +58,36 @@ struct DashboardView: View {
     private var work: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Filter issues, PRs, actions…", text: $workFilter)
+                        .textFieldStyle(.plain)
+                    if !workFilter.isEmpty {
+                        Button { workFilter = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 11).padding(.vertical, 9)
+                .background(.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
                 if !model.errors.isEmpty { errorCard }
                 SummaryStrip(model: model)
                 DashboardSection(title: "Assigned to me", icon: "person.crop.circle.badge.checkmark",
-                                 count: model.issues.count) {
-                    if model.issues.isEmpty { EmptyRow(text: "No open GitHub issues assigned to you") }
-                    ForEach(model.issues) { issue in
+                                 count: filteredIssues.count) {
+                    if filteredIssues.isEmpty { EmptyRow(text: workFilter.isEmpty ? "No open GitHub issues assigned to you" : "No matching issues") }
+                    ForEach(filteredIssues) { issue in
                         IssueRow(issue: issue, initialNote: model.note(for: issue.id)) {
                             model.saveNote($0, for: issue.id)
                         }
                     }
                 }
                 DashboardSection(title: "Open pull requests", icon: "arrow.triangle.pull",
-                                 count: model.pullRequests.count) {
-                    if model.pullRequests.isEmpty { EmptyRow(text: "No open pull requests created by you") }
-                    ForEach(model.pullRequests) { PullRequestRow(item: $0) }
+                                 count: filteredPullRequests.count) {
+                    if filteredPullRequests.isEmpty { EmptyRow(text: workFilter.isEmpty ? "No open pull requests created by you" : "No matching pull requests") }
+                    ForEach(filteredPullRequests) { PullRequestRow(item: $0) }
                 }
                 DashboardSection(title: "GitHub Actions", icon: "play.square.stack",
-                                 count: model.actions.filter { $0.isRunning || $0.isProblem }.count) {
-                    let visible = Array(model.actions.prefix(16))
+                                 count: filteredActions.filter { $0.isRunning || $0.isProblem }.count) {
+                    let visible = Array(filteredActions.prefix(16))
                     if visible.isEmpty { EmptyRow(text: "Add a repository in Settings to monitor Actions") }
                     ForEach(visible) { ActionRow(item: $0) }
                 }
@@ -92,6 +104,13 @@ struct DashboardView: View {
                 } else if model.events.isEmpty {
                     MessageCard(icon: "calendar", title: "Your next 7 days are clear",
                                 detail: "Google Calendar events appear here through the Calendar account on your Mac.")
+                }
+                if let next = nextEvent {
+                    NextMeetingCard(item: next)
+                }
+                let today = model.events.filter { Calendar.current.isDateInToday($0.start) && !$0.isAllDay }
+                if !today.isEmpty {
+                    TodayTimeline(events: today)
                 }
                 ForEach(groupedEvents, id: \.0) { day, events in
                     VStack(alignment: .leading, spacing: 0) {
@@ -169,6 +188,108 @@ struct DashboardView: View {
     private var groupedEvents: [(Date, [CalendarItem])] {
         Dictionary(grouping: model.events) { Calendar.current.startOfDay(for: $0.start) }
             .sorted { $0.key < $1.key }
+    }
+
+    private var nextEvent: CalendarItem? {
+        model.events.first { $0.end > Date() && !$0.isAllDay }
+    }
+
+    private var filteredIssues: [GithubIssueItem] {
+        guard !normalizedFilter.isEmpty else { return model.issues }
+        return model.issues.filter { "\($0.title) \($0.repository) \($0.number) \($0.labels.joined(separator: " ")) \(model.note(for: $0.id))".lowercased().contains(normalizedFilter) }
+    }
+
+    private var filteredPullRequests: [PullRequestItem] {
+        guard !normalizedFilter.isEmpty else { return model.pullRequests }
+        return model.pullRequests.filter { "\($0.title) \($0.repository) \($0.number)".lowercased().contains(normalizedFilter) }
+    }
+
+    private var filteredActions: [ActionItem] {
+        guard !normalizedFilter.isEmpty else { return model.actions }
+        return model.actions.filter { "\($0.title) \($0.workflow) \($0.repository) \($0.branch) \($0.status) \($0.conclusion)".lowercased().contains(normalizedFilter) }
+    }
+
+    private var normalizedFilter: String {
+        workFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
+private struct NextMeetingCard: View {
+    let item: CalendarItem
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.14))
+                    Image(systemName: item.start <= context.date ? "video.fill" : "calendar.badge.clock")
+                        .font(.system(size: 17, weight: .semibold)).foregroundStyle(.tint)
+                }.frame(width: 42, height: 42)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(status(at: context.date)).font(.system(size: 10, weight: .semibold)).foregroundStyle(.tint)
+                    Text(item.title).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                    Text(metadata).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                if let meetingURL = item.meetingURL {
+                    Button("Join") { NSWorkspace.shared.open(meetingURL) }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                }
+            }
+            .padding(12)
+            .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.18)))
+        }
+    }
+
+    private func status(at now: Date) -> String {
+        if item.start <= now && item.end > now { return "HAPPENING NOW" }
+        let seconds = max(0, item.start.timeIntervalSince(now))
+        if seconds < 3600 { return "STARTS IN \(max(1, Int(ceil(seconds / 60)))) MIN" }
+        if Calendar.current.isDateInToday(item.start) {
+            return "STARTS IN \(Int(seconds / 3600)) HR"
+        }
+        return "NEXT MEETING"
+    }
+
+    private var metadata: String {
+        let time = "\(item.start.formatted(date: .omitted, time: .shortened))–\(item.end.formatted(date: .omitted, time: .shortened))"
+        return [time, item.calendar, item.location].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
+private struct TodayTimeline: View {
+    let events: [CalendarItem]
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack { Text("Today at a glance").font(.system(size: 11, weight: .semibold)); Spacer(); Text(context.date.formatted(date: .omitted, time: .shortened)).font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary) }
+                GeometryReader { proxy in
+                    let rangeStart = context.date.addingTimeInterval(-3 * 3600)
+                    let rangeEnd = context.date.addingTimeInterval(6 * 3600)
+                    ZStack(alignment: .topLeading) {
+                        ForEach(0..<10, id: \.self) { hour in
+                            let x = proxy.size.width * CGFloat(hour) / 9
+                            Rectangle().fill(Color.secondary.opacity(0.12)).frame(width: 1, height: 36).offset(x: x)
+                        }
+                        ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
+                            if event.end > rangeStart && event.start < rangeEnd {
+                                let start = max(0, event.start.timeIntervalSince(rangeStart) / rangeEnd.timeIntervalSince(rangeStart))
+                                let end = min(1, event.end.timeIntervalSince(rangeStart) / rangeEnd.timeIntervalSince(rangeStart))
+                                Capsule().fill(Color.accentColor.opacity(0.28)).overlay(Capsule().stroke(Color.accentColor.opacity(0.8)))
+                                    .frame(width: max(5, proxy.size.width * CGFloat(end - start)), height: 8)
+                                    .offset(x: proxy.size.width * CGFloat(start), y: CGFloat(index % 3) * 11 + 2)
+                                    .help(event.title)
+                            }
+                        }
+                        Rectangle().fill(Color.red).frame(width: 2, height: 38).offset(x: proxy.size.width / 3)
+                    }
+                }.frame(height: 38)
+                HStack { Text("−3h"); Spacer(); Text("now").foregroundStyle(.red); Spacer(); Text("+6h") }.font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+            .padding(11).background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        }
     }
 }
 

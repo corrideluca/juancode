@@ -122,7 +122,9 @@ final class AssistantModel {
         return eventStore.events(matching: predicate).map {
             CalendarItem(id: $0.eventIdentifier ?? UUID().uuidString, title: $0.title ?? "Untitled event",
                          calendar: $0.calendar.title, start: $0.startDate, end: $0.endDate,
-                         isAllDay: $0.isAllDay, url: $0.url)
+                         isAllDay: $0.isAllDay, url: $0.url,
+                         meetingURL: meetingURL(eventURL: $0.url, location: $0.location, notes: $0.notes),
+                         location: $0.location ?? "")
         }.sorted { $0.start < $1.start }
     }
 
@@ -170,4 +172,25 @@ final class AssistantModel {
     private func noteKey(_ id: String) -> String {
         "assistant.note." + Data(id.utf8).base64EncodedString()
     }
+}
+
+private func meetingURL(eventURL: URL?, location: String?, notes: String?) -> URL? {
+    let supportedHosts = [
+        "meet.google.com", "zoom.us", "teams.microsoft.com", "teams.live.com",
+        "webex.com", "whereby.com", "around.co", "slack.com", "facetime.apple.com",
+    ]
+    func supported(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        return supportedHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+    if let eventURL, supported(eventURL) { return eventURL }
+    let text = [location, notes].compactMap { $0 }.joined(separator: "\n")
+    guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+        return eventURL
+    }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    for match in detector.matches(in: text, range: range) {
+        if let url = match.url, supported(url) { return url }
+    }
+    return eventURL
 }
