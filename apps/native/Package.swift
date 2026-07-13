@@ -18,6 +18,9 @@ let package = Package(
         .executable(name: "CorriCode", targets: ["JuancodeApp"]),
         // Compatibility alias for existing scripts/docs.
         .executable(name: "juancode", targets: ["JuancodeApp"]),
+        // Standalone, terminal-free personal dashboard. A floating right-edge
+        // panel for GitHub work, Calendar, local notes, and quick assistant asks.
+        .executable(name: "CorriAssistant", targets: ["CorriAssistant"]),
     ],
     dependencies: [
         // SQLite persistence (juancode-u34.5). Mirrors db.ts (better-sqlite3).
@@ -91,6 +94,11 @@ let package = Package(
                 // A/B comparison. See GhosttyLive.swift.
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
             ]
+        ),
+        .executableTarget(
+            name: "CorriAssistant",
+            dependencies: ["JuancodeCore", "JuancodeServices"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
             name: "JuancodeCoreTests",

@@ -199,3 +199,19 @@ With `juancode-serve` running, point the web dev server at it
 (`pnpm --filter @juancode/web dev`) — Vite proxies `/api` + `/ws` to `:4280`.
 
 Requires `claude`/`codex` on PATH for the smoke; tests need neither (fake resolver).
+
+## Corri Assistant companion
+
+`CorriAssistant` is a separate terminal-free macOS companion: an always-floating
+right-edge panel with assigned GitHub issues, your open PRs, GitHub Actions,
+per-issue local notes, a seven-day Calendar agenda, notifications, and a quick
+assistant backed by the authenticated `claude` CLI.
+
+```sh
+cd apps/native
+./scripts/dev-assistant.sh
+```
+
+It uses the existing `gh` login. Google calendars are read through macOS Calendar,
+so connect the Google account in System Settings first. Extra repositories whose
+Actions should always be watched can be added in the app's Settings.
