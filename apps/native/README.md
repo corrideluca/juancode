@@ -204,8 +204,11 @@ Requires `claude`/`codex` on PATH for the smoke; tests need neither (fake resolv
 
 `CorriAssistant` is a separate terminal-free macOS companion: an always-floating
 right-edge panel with assigned GitHub issues, your open PRs, GitHub Actions,
-per-issue local notes, a seven-day Calendar agenda, notifications, and a quick
-assistant backed by the authenticated `claude` CLI.
+per-issue local notes, a dedicated persistent Notes workspace, a seven-day
+Calendar agenda, notifications, and a quick assistant backed by the authenticated
+`claude` CLI. Notes include inline AI actions for improving, continuing,
+summarizing, or following a custom writing instruction; they are also available
+as context in the main Ask tab.
 
 ```sh
 cd apps/native

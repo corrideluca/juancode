@@ -59,6 +59,23 @@ struct ChatMessage: Identifiable, Equatable, Sendable {
     let text: String
 }
 
+struct PersonalNote: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID
+    var title: String
+    var body: String
+    var createdAt: Date
+    var updatedAt: Date
+
+    init(id: UUID = UUID(), title: String = "Untitled note", body: String = "",
+         createdAt: Date = Date(), updatedAt: Date = Date()) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
 struct GithubSnapshot: Sendable {
     let login: String
     let pullRequests: [PullRequestItem]

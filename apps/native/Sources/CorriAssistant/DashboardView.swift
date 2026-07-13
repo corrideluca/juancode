@@ -12,7 +12,8 @@ struct DashboardView: View {
             Picker("Section", selection: $model.selectedSection) {
                 Label("Work", systemImage: "tray.full").tag(0)
                 Label("Agenda", systemImage: "calendar").tag(1)
-                Label("Ask", systemImage: "sparkles").tag(2)
+                Label("Notes", systemImage: "note.text").tag(2)
+                Label("Ask", systemImage: "sparkles").tag(3)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -22,7 +23,8 @@ struct DashboardView: View {
             Group {
                 switch model.selectedSection {
                 case 1: agenda
-                case 2: assistant
+                case 2: NotesWorkspace(model: model)
+                case 3: assistant
                 default: work
                 }
             }
@@ -212,6 +214,172 @@ struct DashboardView: View {
     private var normalizedFilter: String {
         workFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
+}
+
+private struct NotesWorkspace: View {
+    @Bindable var model: AssistantModel
+    @State private var selection: UUID?
+    @State private var query = ""
+
+    var body: some View {
+        Group {
+            if let id = selection, let note = model.notes.first(where: { $0.id == id }) {
+                NoteEditor(model: model, note: note) { selection = nil }
+            } else {
+                noteList
+            }
+        }
+    }
+
+    private var noteList: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search notes…", text: $query).textFieldStyle(.plain)
+                Button {
+                    selection = model.createNote()
+                } label: {
+                    Label("New", systemImage: "square.and.pencil")
+                }.buttonStyle(.borderedProminent).controlSize(.small)
+            }.padding(12)
+            Divider()
+            if filteredNotes.isEmpty {
+                VStack(spacing: 10) {
+                    Spacer()
+                    Image(systemName: "note.text").font(.system(size: 32)).foregroundStyle(.secondary)
+                    Text(query.isEmpty ? "No notes yet" : "No matching notes").font(.headline)
+                    Text(query.isEmpty ? "Capture an idea, plan, meeting note, or draft." : "Try a different search.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    if query.isEmpty {
+                        Button("Create your first note") { selection = model.createNote() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    Spacer()
+                }.frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(filteredNotes) { note in
+                            Button { selection = note.id } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack {
+                                        Text(note.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                                        Spacer()
+                                        Text(relativeNoteDate(note.updatedAt)).font(.system(size: 9)).foregroundStyle(.tertiary)
+                                    }
+                                    Text(note.body.isEmpty ? "Empty note" : note.body)
+                                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .padding(11).contentShape(Rectangle())
+                                .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 11))
+                            }.buttonStyle(.plain)
+                        }
+                    }.padding(12)
+                }
+            }
+        }
+    }
+
+    private var filteredNotes: [PersonalNote] {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !term.isEmpty else { return model.notes }
+        return model.notes.filter { "\($0.title) \($0.body)".lowercased().contains(term) }
+    }
+}
+
+private struct NoteEditor: View {
+    @Bindable var model: AssistantModel
+    let note: PersonalNote
+    let close: () -> Void
+    @State private var title: String
+    @State private var bodyText: String
+    @State private var aiInstruction = ""
+    @State private var showingDelete = false
+    @FocusState private var bodyFocused: Bool
+
+    init(model: AssistantModel, note: PersonalNote, close: @escaping () -> Void) {
+        self.model = model
+        self.note = note
+        self.close = close
+        _title = State(initialValue: note.title)
+        _bodyText = State(initialValue: note.body)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: saveAndClose) { Image(systemName: "chevron.left") }
+                    .buttonStyle(.borderless).help("Back to notes")
+                TextField("Note title", text: $title).textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .semibold))
+                if isBusy { ProgressView().controlSize(.small) }
+                Button { showingDelete = true } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless).foregroundStyle(.red).help("Delete note")
+            }.padding(12)
+            Divider()
+            TextEditor(text: $bodyText)
+                .font(.system(size: 13)).scrollContentBackground(.hidden).padding(10)
+                .focused($bodyFocused)
+                .onChange(of: title) { _, _ in save() }
+                .onChange(of: bodyText) { _, _ in save() }
+
+            VStack(spacing: 8) {
+                HStack {
+                    Label("Write with AI", systemImage: "sparkles").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tint)
+                    Spacer()
+                    Text("Claude uses this note only for the request").font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+                HStack(spacing: 6) {
+                    aiButton("Improve", "Improve the writing, clarity, and structure without changing the meaning.")
+                    aiButton("Continue", "Continue this note naturally with useful detail and concrete next steps.")
+                    aiButton("Summarize", "Rewrite this as a concise summary with key points and next steps.")
+                }
+                HStack(alignment: .bottom, spacing: 7) {
+                    TextField("Or tell AI what to do…", text: $aiInstruction, axis: .vertical)
+                        .textFieldStyle(.plain).lineLimit(1...3).padding(8)
+                        .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                        .onSubmit { runCustomInstruction() }
+                    Button { runCustomInstruction() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 21)) }
+                        .buttonStyle(.plain).foregroundStyle(.tint)
+                        .disabled(aiInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isBusy)
+                }
+            }
+            .padding(10).background(Color.accentColor.opacity(0.055))
+        }
+        .onChange(of: currentNote?.body) { _, newValue in
+            guard !isBusy, let newValue, newValue != bodyText else { return }
+            bodyText = newValue
+        }
+        .confirmationDialog("Delete this note?", isPresented: $showingDelete) {
+            Button("Delete", role: .destructive) { model.deleteNote(id: note.id); close() }
+        }
+    }
+
+    private var currentNote: PersonalNote? { model.notes.first { $0.id == note.id } }
+    private var isBusy: Bool { model.noteAssistantBusy.contains(note.id) }
+
+    private func aiButton(_ label: String, _ instruction: String) -> some View {
+        Button(label) { save(); model.assistNote(id: note.id, instruction: instruction) }
+            .buttonStyle(.bordered).controlSize(.small).disabled(isBusy)
+    }
+
+    private func runCustomInstruction() {
+        let instruction = aiInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty else { return }
+        save()
+        model.assistNote(id: note.id, instruction: instruction)
+        aiInstruction = ""
+    }
+
+    private func save() { model.updateNote(id: note.id, title: title, body: bodyText) }
+    private func saveAndClose() { save(); close() }
+}
+
+private func relativeNoteDate(_ date: Date) -> String {
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .abbreviated
+    return formatter.localizedString(for: date, relativeTo: Date())
 }
 
 private struct NextMeetingCard: View {

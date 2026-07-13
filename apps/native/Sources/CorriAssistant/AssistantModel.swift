@@ -19,6 +19,8 @@ final class AssistantModel {
     var chatInput = ""
     var chatMessages: [ChatMessage] = []
     var isAsking = false
+    var notes: [PersonalNote] = PersonalNotesStore.load()
+    var noteAssistantBusy = Set<UUID>()
     var calendarAccessDenied = false
     var notificationEnabled = UserDefaults.standard.object(forKey: "assistant.notifications") as? Bool ?? true
     var repositoryText = UserDefaults.standard.string(forKey: "assistant.repositories") ?? ""
@@ -106,6 +108,57 @@ final class AssistantModel {
         }
     }
 
+    @discardableResult
+    func createNote() -> UUID {
+        let note = PersonalNote()
+        notes.insert(note, at: 0)
+        persistNotes()
+        return note.id
+    }
+
+    func updateNote(id: UUID, title: String, body: String) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[index].title = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? inferredNoteTitle(body) : title
+        notes[index].body = body
+        notes[index].updatedAt = Date()
+        notes.sort { $0.updatedAt > $1.updatedAt }
+        persistNotes()
+    }
+
+    func deleteNote(id: UUID) {
+        notes.removeAll { $0.id == id }
+        persistNotes()
+    }
+
+    func assistNote(id: UUID, instruction: String) {
+        guard let note = notes.first(where: { $0.id == id }), !noteAssistantBusy.contains(id) else { return }
+        noteAssistantBusy.insert(id)
+        let prompt = """
+        You are a thoughtful writing assistant. Follow the instruction and return only the finished note,
+        with no preamble, critique, or markdown code fence. Preserve factual details. Use clear natural prose.
+
+        Instruction: \(instruction)
+        Note title: \(note.title)
+        Note body:
+        \(note.body)
+        """
+        Task {
+            let revised: String?
+            do {
+                let result = try await ProcessRunner.capture(
+                    "claude", ["-p", "--output-format", "text", prompt],
+                    cwd: FileManager.default.homeDirectoryForCurrentUser.path, timeout: 120)
+                let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                revised = result.ok && !output.isEmpty ? output : nil
+            } catch {
+                revised = nil
+            }
+            noteAssistantBusy.remove(id)
+            if let revised { updateNote(id: id, title: note.title, body: revised) }
+        }
+    }
+
     private func loadCalendar() async -> [CalendarItem] {
         let granted: Bool
         switch EKEventStore.authorizationStatus(for: .event) {
@@ -132,10 +185,11 @@ final class AssistantModel {
         let issueLines = issues.prefix(20).map { "- [issue] \($0.repository)#\($0.number): \($0.title). Note: \(note(for: $0.id))" }
         let prLines = pullRequests.prefix(20).map { "- [PR] \($0.repository)#\($0.number): \($0.title)" }
         let eventLines = events.prefix(12).map { "- [calendar] \($0.start.formatted()): \($0.title)" }
+        let noteLines = notes.prefix(20).map { "- [note] \($0.title): \($0.body.prefix(500))" }
         return """
         You are a concise personal work assistant. Help prioritize, summarize, plan, and draft communication.
         Do not suggest code changes unless explicitly asked. Current dashboard:
-        \((issueLines + prLines + eventLines).joined(separator: "\n"))
+        \((issueLines + prLines + eventLines + noteLines).joined(separator: "\n"))
         """
     }
 
@@ -171,6 +225,31 @@ final class AssistantModel {
 
     private func noteKey(_ id: String) -> String {
         "assistant.note." + Data(id.utf8).base64EncodedString()
+    }
+
+    private func inferredNoteTitle(_ body: String) -> String {
+        let firstLine = body.split(whereSeparator: \.isNewline).first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return firstLine.isEmpty ? "Untitled note" : String(firstLine.prefix(60))
+    }
+
+    private func persistNotes() {
+        PersonalNotesStore.save(notes)
+    }
+}
+
+private enum PersonalNotesStore {
+    private static let key = "assistant.personalNotes.v1"
+
+    static func load() -> [PersonalNote] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let notes = try? JSONDecoder().decode([PersonalNote].self, from: data) else { return [] }
+        return notes.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    static func save(_ notes: [PersonalNote]) {
+        guard let data = try? JSONEncoder().encode(notes) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }
 
